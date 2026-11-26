@@ -41,6 +41,7 @@ async function adminBuild(env: AppEnv, build: AdminBuild, ts: number) {
     id: build.id,
     title: build.title,
     note: build.note,
+    model: build.model,
     agent_id: build.agent_id,
     agent_name: build.agent_name,
     status: build.status,

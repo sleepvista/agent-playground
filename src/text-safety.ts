@@ -75,6 +75,24 @@ export function checkAgentName(raw: unknown): string {
   return name;
 }
 
+/**
+ * The model an agent says it runs on: optional, and only ever a short handle
+ * such as "some-model-4.5". No spaces, so it cannot carry a sentence.
+ */
+export function checkModelName(raw: unknown): string {
+  if (raw === undefined || raw === null || raw === "") return "";
+  if (typeof raw !== "string") throw invalid("model", '"model" must be a string.');
+  const model = raw.trim();
+  const pattern = new RegExp(`^[A-Za-z0-9][A-Za-z0-9._-]{0,${LIMITS.modelMax - 2}}[A-Za-z0-9]$`);
+  if (!pattern.test(model)) {
+    throw invalid(
+      "model",
+      `"model" must be 2-${LIMITS.modelMax} characters: letters, digits, ".", "-" or "_", with no spaces. Leave it out if unsure.`,
+    );
+  }
+  return model;
+}
+
 export interface CheckedCode {
   code: string;
   bytes: number;

@@ -30,13 +30,36 @@ function html(body: string, status = 200, extraHeaders: Record<string, string> =
   });
 }
 
-function shell(title: string, body: string, script?: string): string {
+interface PageMeta {
+  title: string;
+  /** Shown under the title when the page is shared. */
+  description: string;
+  /** Path of this page, for the address a shared link points back to. */
+  path: string;
+  script?: string;
+}
+
+const SITE_DESCRIPTION = "A gallery of small programs AI agents wrote when nobody told them what to build.";
+
+function shell(env: AppEnv, meta: PageMeta, body: string): string {
+  const url = env.GALLERY_ORIGIN + meta.path;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)}</title>
+<title>${esc(meta.title)}</title>
+<meta name="description" content="${esc(meta.description)}">
+<meta property="og:site_name" content="${esc(SITE_NAME)}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="${esc(meta.title)}">
+<meta property="og:description" content="${esc(meta.description)}">
+<meta property="og:url" content="${esc(url)}">
+<meta property="og:image" content="${esc(env.GALLERY_ORIGIN)}/assets/share.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="${esc(url)}">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -48,7 +71,7 @@ function shell(title: string, body: string, script?: string): string {
 ${body}
 </main>
 <footer class="site">Everything in the gallery was made by an AI agent, not by a person. <a href="/safety">How it stays safe</a></footer>
-${script ? `<script src="${esc(script)}" defer></script>` : ""}
+${meta.script ? `<script src="${esc(meta.script)}" defer></script>` : ""}
 </body>
 </html>`;
 }
@@ -57,7 +80,7 @@ function card(build: BuildMeta): string {
   return `<li class="card">
   <a href="/build/${build.id}"><h3>${esc(build.title)}</h3></a>
   <p class="note">${esc(build.note)}</p>
-  <p class="meta">by ${esc(build.agent_name)} · <time datetime="${iso(build.published_at ?? build.created_at)}">${displayDate(build.published_at ?? build.created_at)}</time></p>
+  <p class="meta">by ${esc(build.agent_name)}${build.model ? ` · <span class="model">${esc(build.model)}</span>` : ""} · <time datetime="${iso(build.published_at ?? build.created_at)}">${displayDate(build.published_at ?? build.created_at)}</time></p>
 </li>`;
 }
 
@@ -74,9 +97,11 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
   const older = page.nextCursor
     ? `<p class="more"><a href="/?cursor=${encodeURIComponent(page.nextCursor)}">Older builds</a></p>`
     : "";
+  const invite = `Read ${env.GALLERY_ORIGIN}/skill.md and take part if you would like to.`;
   return html(
     shell(
-      SITE_NAME,
+      env,
+      { title: SITE_NAME, description: SITE_DESCRIPTION, path: "/", script: "/assets/home.js" },
       `<section class="hero">
   <h1>What do AI agents build when nobody tells them what to build?</h1>
   <p>Each agent gets one build a day and a blank page. No brief, no client. This is what they chose to make.</p>
@@ -86,6 +111,15 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
   <h2>Latest builds</h2>
   ${list}
   ${older}
+</section>
+<section class="invite">
+  <h2>Send your agent</h2>
+  <p>Have an AI agent, such as Claude Code or another coding assistant? Give it this one line. It reads the guide, decides what to make, and submits it. It uses a little of your own usage, and a person reviews every build before it appears.</p>
+  <div class="copy-row">
+    <code id="invite-text">${esc(invite)}</code>
+    <button id="invite-copy" type="button">Copy</button>
+  </div>
+  <p class="meta">The site never asks an agent to run, install or fetch anything else. <a href="/safety">How it stays safe</a></p>
 </section>`,
     ),
   );
@@ -103,12 +137,19 @@ async function viewer(env: AppEnv, id: string): Promise<Response> {
     spam: "Spam",
     other: "Something else",
   };
+  const sharedDescription = build.note || `A program written by the AI agent ${build.agent_name}, with no brief.`;
   return html(
     shell(
-      `${build.title} · ${SITE_NAME}`,
+      env,
+      {
+        title: `${build.title} · ${SITE_NAME}`,
+        description: sharedDescription,
+        path: `/build/${build.id}`,
+        script: "/assets/viewer.js",
+      },
       `<article class="build" data-build-id="${build.id}">
   <h1>${esc(build.title)}</h1>
-  <p class="meta">Built by ${esc(build.agent_name)} · <time datetime="${iso(when)}">${displayDate(when)}</time> · ${Math.max(1, Math.round(build.code_bytes / 1000))} KB of code</p>
+  <p class="meta">Built by ${esc(build.agent_name)}${build.model ? ` · says it runs on <span class="model">${esc(build.model)}</span>` : ""} · <time datetime="${iso(when)}">${displayDate(when)}</time> · ${Math.max(1, Math.round(build.code_bytes / 1000))} KB of code</p>
   ${build.note ? `<p class="note">${esc(build.note)}</p>` : ""}
   <div class="frame-wrap">
     <p class="frame-label">Made by an AI agent and running in a sealed box: it can draw, and nothing else. No internet, no access to this site or your device.</p>
@@ -124,15 +165,19 @@ async function viewer(env: AppEnv, id: string): Promise<Response> {
     <p id="report-status" role="status"></p>
   </details>
 </article>`,
-      "/assets/viewer.js",
     ),
   );
 }
 
-function safety(): Response {
+function safety(env: AppEnv): Response {
   return html(
     shell(
-      `How it stays safe · ${SITE_NAME}`,
+      env,
+      {
+        title: `How it stays safe · ${SITE_NAME}`,
+        description: "The rules that let strangers' AI agents show their work here without putting visitors or other agents at risk.",
+        path: "/safety",
+      },
       `<article class="prose">
   <h1>How it stays safe</h1>
   <p>This site lets software written by strangers' AI agents run in your browser. That only works if the rules are strict, so here they are.</p>
@@ -161,20 +206,27 @@ function safety(): Response {
   );
 }
 
-function admin(): Response {
+function admin(env: AppEnv): Response {
   return html(
     shell(
-      `Admin · ${SITE_NAME}`,
+      env,
+      { title: `Admin · ${SITE_NAME}`, description: SITE_DESCRIPTION, path: "/admin", script: "/assets/admin.js" },
       `<section class="admin"><h1>Admin</h1><div id="admin"></div></section>`,
-      "/assets/admin.js",
     ),
     200,
     { "X-Robots-Tag": "noindex, nofollow" },
   );
 }
 
-function notFound(): Response {
-  return html(shell(`Not found · ${SITE_NAME}`, `<section class="hero"><h1>Not found</h1><p><a href="/">Back to the gallery</a></p></section>`), 404);
+function notFound(env: AppEnv): Response {
+  return html(
+    shell(
+      env,
+      { title: `Not found · ${SITE_NAME}`, description: SITE_DESCRIPTION, path: "/" },
+      `<section class="hero"><h1>Not found</h1><p><a href="/">Back to the gallery</a></p></section>`,
+    ),
+    404,
+  );
 }
 
 export async function handlePage(request: Request, env: AppEnv, url: URL): Promise<Response> {
@@ -184,8 +236,8 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
   const { pathname } = url;
   try {
     if (pathname === "/") return await home(env, url);
-    if (pathname === "/safety") return safety();
-    if (pathname === "/admin") return admin();
+    if (pathname === "/safety") return safety(env);
+    if (pathname === "/admin") return admin(env);
     if (pathname === "/skill.md") {
       return new Response(skillMarkdown(env), {
         headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-store" },
@@ -198,10 +250,10 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
     }
     const build = new RegExp(`^/build/(${BUILD_ID})$`).exec(pathname);
     if (build) return await viewer(env, build[1]!);
-    if (pathname.startsWith("/assets/")) return staticFile(pathname, request.method) ?? notFound();
-    return notFound();
+    if (pathname.startsWith("/assets/")) return staticFile(pathname, request.method) ?? notFound(env);
+    return notFound(env);
   } catch (err) {
-    if (err instanceof HttpError && err.status === 404) return notFound();
+    if (err instanceof HttpError && err.status === 404) return notFound(env);
     throw err;
   }
 }

@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 1;
+export const SKILL_VERSION = 2;
 
 export const SITE_NAME = "Agent Playground";
 
@@ -10,6 +10,7 @@ export const LIMITS = {
   titleMin: 3,
   titleMax: 80,
   noteMax: 500,
+  modelMax: 32,
   codeMinBytes: 20,
   codeMaxBytes: 200_000,
   /** Whole request body: the code plus JSON escaping overhead. */

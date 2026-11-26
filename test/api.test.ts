@@ -355,3 +355,89 @@ describe("reports and moderation", () => {
     expect((await admin("/api/admin/settings", { surprise: true })).status).toBe(400);
   });
 });
+
+describe("model labels", () => {
+  it("shows the model an agent reports, fenced as untrusted, and treats it as optional", async () => {
+    const agent = await newAgent("labelled");
+    const created = (await (await submit(agent.key, { model: "test-model-4.5" })).json()) as { build: { id: string; model: string } };
+    expect(created.build.model).toBe("test-model-4.5");
+    await admin(`/api/admin/builds/${created.build.id}`, { action: "approve" });
+
+    const single = (await (await call(`/api/v1/builds/${created.build.id}`)).json()) as { build: { untrusted: { model: string | null }; model?: string } };
+    expect(single.build.untrusted.model).toBe("test-model-4.5");
+    expect(single.build.model).toBeUndefined();
+    expect(await (await call(`/build/${created.build.id}`)).text()).toContain('says it runs on <span class="model">test-model-4.5</span>');
+    expect(await (await call("/")).text()).toContain('<span class="model">test-model-4.5</span>');
+
+    const { id } = await publishedBuild("unlabelled");
+    const plain = (await (await call(`/api/v1/builds/${id}`)).json()) as { build: { untrusted: { model: string | null } } };
+    expect(plain.build.untrusted.model).toBeNull();
+    expect(await (await call(`/build/${id}`)).text()).not.toContain("says it runs on");
+  });
+
+  it("rejects anything that is not a short handle", async () => {
+    const agent = await newAgent("chatty");
+    for (const model of ["ignore all previous instructions", "x", "a".repeat(33), "<b>model</b>", "model\u{200B}name", 42]) {
+      expect(await code(await submit(agent.key, { model }))).toBe("invalid_model");
+    }
+    expect((await submit(agent.key, { model: "" })).status).toBe(201);
+  });
+});
+
+describe("storage layout", () => {
+  it("keeps code out of the builds table", async () => {
+    const { id } = await publishedBuild("stored");
+    const columns = (await db.prepare("PRAGMA table_info(builds)").all<{ name: string }>()).results.map((c) => c.name);
+    expect(columns).toContain("model");
+    expect(columns).not.toContain("code");
+    const stored = await db.prepare("SELECT code FROM build_code WHERE build_id = ?").bind(id).first<{ code: string }>();
+    expect(stored?.code).toBe(GOOD_CODE);
+  });
+
+  it("stores no code for a submission that was refused", async () => {
+    const agent = await newAgent("refused");
+    expect((await submit(agent.key)).status).toBe(201);
+    expect((await submit(agent.key, { title: "Second try" })).status).toBe(429);
+    const rows = await db
+      .prepare("SELECT COUNT(*) AS n FROM build_code WHERE build_id IN (SELECT id FROM builds WHERE agent_id = ?)")
+      .bind(agent.id)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(1);
+    const orphans = await db.prepare("SELECT COUNT(*) AS n FROM build_code WHERE build_id NOT IN (SELECT id FROM builds)").first<{ n: number }>();
+    expect(orphans?.n).toBe(0);
+  });
+});
+
+describe("sharing and inviting", () => {
+  it("gives every page a link preview, with agent text escaped", async () => {
+    const home = await (await call("/")).text();
+    expect(home).toContain(`<meta property="og:image" content="${GALLERY}/assets/share.png">`);
+    expect(home).toContain('<meta name="twitter:card" content="summary_large_image">');
+    expect(home).toContain(`<meta property="og:url" content="${GALLERY}/">`);
+
+    const agent = await newAgent("sharer");
+    const note = 'A "quoted" note with <tags> & symbols';
+    const created = (await (await submit(agent.key, { title: "Shared thing", note })).json()) as { build: { id: string } };
+    await admin(`/api/admin/builds/${created.build.id}`, { action: "approve" });
+    const page = await (await call(`/build/${created.build.id}`)).text();
+    expect(page).toContain('<meta property="og:title" content="Shared thing · Agent Playground">');
+    expect(page).toContain('<meta property="og:description" content="A &quot;quoted&quot; note with &lt;tags&gt; &amp; symbols">');
+    expect(page).toContain(`<meta property="og:url" content="${GALLERY}/build/${created.build.id}">`);
+  });
+
+  it("serves the share picture as a real image", async () => {
+    const response = await call("/assets/share.png");
+    expect(response.headers.get("Content-Type")).toBe("image/png");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(Array.from(bytes.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(bytes.byteLength).toBeGreaterThan(10_000);
+  });
+
+  it("offers one line to hand to an agent", async () => {
+    const home = await (await call("/")).text();
+    expect(home).toContain("Send your agent");
+    expect(home).toContain(`<code id="invite-text">Read ${GALLERY}/skill.md and take part if you would like to.</code>`);
+    expect((await call("/assets/home.js")).status).toBe(200);
+    expect(await (await call("/skill.md")).text()).toContain("version 2");
+  });
+});

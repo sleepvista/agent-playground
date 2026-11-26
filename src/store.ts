@@ -23,6 +23,7 @@ export interface BuildMeta {
   day: string;
   title: string;
   note: string;
+  model: string;
   status: BuildStatus;
   reviewed: number;
   code_bytes: number;
@@ -30,7 +31,7 @@ export interface BuildMeta {
   published_at: number | null;
 }
 
-const BUILD_META_COLUMNS = `b.id, b.agent_id, a.name AS agent_name, b.day, b.title, b.note, b.status,
+const BUILD_META_COLUMNS = `b.id, b.agent_id, a.name AS agent_name, b.day, b.title, b.note, b.model, b.status,
   b.reviewed, b.code_bytes, b.created_at, b.published_at`;
 
 // ---------------------------------------------------------------- settings
@@ -164,6 +165,7 @@ export async function createBuild(
     agentId: string;
     title: string;
     note: string;
+    model: string;
     status: "pending" | "published";
     code: string;
     codeBytes: number;
@@ -173,30 +175,36 @@ export async function createBuild(
   siteDailyCap: number,
 ): Promise<CreateBuildResult> {
   const day = utcDay(build.createdAt);
-  const result = await db
-    .prepare(
-      `INSERT INTO builds (id, agent_id, day, title, note, status, code_bytes, code_sha256, created_at, published_at, code)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE (SELECT COUNT(*) FROM builds WHERE day = ?) < ?
-       ON CONFLICT DO NOTHING`,
-    )
-    .bind(
-      build.id,
-      build.agentId,
-      day,
-      build.title,
-      build.note,
-      build.status,
-      build.codeBytes,
-      build.codeSha256,
-      build.createdAt,
-      build.status === "published" ? build.createdAt : null,
-      build.code,
-      day,
-      siteDailyCap,
-    )
-    .run();
-  if (result.meta.changes === 1) return "created";
+  // One transaction. The first statement decides the site-wide cap and the
+  // one-per-day rule; the second stores the code only if the first inserted.
+  const [inserted] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO builds (id, agent_id, day, title, note, model, status, code_bytes, code_sha256, created_at, published_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM builds WHERE day = ?) < ?
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(
+        build.id,
+        build.agentId,
+        day,
+        build.title,
+        build.note,
+        build.model,
+        build.status,
+        build.codeBytes,
+        build.codeSha256,
+        build.createdAt,
+        build.status === "published" ? build.createdAt : null,
+        day,
+        siteDailyCap,
+      ),
+    db
+      .prepare("INSERT INTO build_code (build_id, code) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM builds WHERE id = ?)")
+      .bind(build.id, build.code, build.id),
+  ]);
+  if (inserted?.meta.changes === 1) return "created";
   return (await findBuildForDay(db, build.agentId, day)) ? "already_built_today" : "site_cap";
 }
 
@@ -208,7 +216,10 @@ export async function getBuildMeta(db: D1Database, id: string): Promise<BuildMet
 }
 
 export async function getBuildCode(db: D1Database, id: string): Promise<{ status: BuildStatus; code: string } | null> {
-  return db.prepare("SELECT status, code FROM builds WHERE id = ?").bind(id).first<{ status: BuildStatus; code: string }>();
+  return db
+    .prepare("SELECT b.status, c.code FROM builds b JOIN build_code c ON c.build_id = b.id WHERE b.id = ?")
+    .bind(id)
+    .first<{ status: BuildStatus; code: string }>();
 }
 
 export interface FeedPage {

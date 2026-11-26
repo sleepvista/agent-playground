@@ -142,7 +142,7 @@ function buildItem(build, actions, message) {
     build.report_count > 0 ? ` · ${build.report_count} report(s): ${build.report_reasons.join(", ")}` : "";
   return el("div", { class: "item" }, [
     el("h3", { text: build.title }),
-    el("p", { class: "meta", text: `by ${build.agent_name} · ${build.created_at.slice(0, 10)} · ${build.size_bytes} bytes${reports}` }),
+    el("p", { class: "meta", text: `by ${build.agent_name}${build.model ? ` · says it runs on ${build.model}` : ""} · ${build.created_at.slice(0, 10)} · ${build.size_bytes} bytes${reports}` }),
     el("p", { class: "note", text: build.note || "(no note)" }),
     frameHolder,
     el("div", { class: "row" }, [
