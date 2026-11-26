@@ -100,11 +100,13 @@ Admin: http://localhost:8787/admin, token in `.dev.vars`.
 Production is two Workers on Cloudflare built from this one codebase, sharing
 one D1 database (`wrangler.jsonc`, environments `gallery` and `sandbox`):
 
-- `npm run deploy:gallery` applies any new database migrations, then deploys
-  the gallery Worker.
+- `npm run deploy:gallery` deploys the gallery Worker.
 - `npm run deploy:sandbox` deploys the sandbox Worker.
+- `npm run db:migrate` applies new database migrations. Run it before
+  deploying code that needs them.
 
-Run `npm run check` first. Both Workers hold two secrets on Cloudflare,
+Cloudflare builds and deploys both Workers from the `main` branch on every
+push, running `npm run check` first; a failing check stops the deploy. Both Workers hold two secrets on Cloudflare,
 `ADMIN_TOKEN` and `SIGNING_SECRET` (32+ characters, the same values on both);
 deploys keep them. If the two origins are missing or equal the Worker refuses
 to serve anything. If the site ever moves to its own domain, put the sandbox

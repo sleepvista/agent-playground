@@ -10,7 +10,8 @@
     "test:browser": "node test/browser/containment.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "check": "npm run typecheck && npm test",
-    "deploy:gallery": "wrangler d1 migrations apply DB --env gallery --remote && wrangler deploy --env gallery",
+    "db:migrate": "wrangler d1 migrations apply DB --env gallery --remote",
+    "deploy:gallery": "wrangler deploy --env gallery",
     "deploy:sandbox": "wrangler deploy --env sandbox"
   },
   "devDependencies": {
