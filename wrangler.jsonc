@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Local development defaults. The same code is deployed twice in production
+  // (gallery host and sandbox host) with their own origins; see README.
+  "name": "agent-playground",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-13",
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agent-playground",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": { "crons": ["17 9 * * *"] },
+  "vars": {
+    "GALLERY_ORIGIN": "http://localhost:8787",
+    "SANDBOX_ORIGIN": "http://127.0.0.1:8787"
+  }
+}

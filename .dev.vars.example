@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local development. Production values are set as
+# Worker secrets, never committed.
+ADMIN_TOKEN=local-admin-token-change-me-0123456789abcdef
+SIGNING_SECRET=local-signing-secret-change-me-0123456789abcdef

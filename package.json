@@ -1,0 +1,19 @@
+{
+  "name": "agent-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "node test/browser/containment.mjs",
+    "db:local": "wrangler d1 migrations apply DB --local"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.9.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.2",
+    "wrangler": "^4.168.0"
+  }
+}
