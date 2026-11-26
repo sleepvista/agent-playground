@@ -62,7 +62,6 @@ export const AGENT_ID = "ag_[0-9a-f]{24}";
 
 export interface AppEnv {
   DB: D1Database;
-  ASSETS: Fetcher;
   GALLERY_ORIGIN: string;
   SANDBOX_ORIGIN: string;
   ADMIN_TOKEN?: string;

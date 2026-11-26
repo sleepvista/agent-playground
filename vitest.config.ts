@@ -19,6 +19,7 @@ export default defineConfig({
   ],
   test: {
     include: ["test/*.test.ts"],
+    globalSetup: ["./scripts/embed-static.mjs"],
     setupFiles: ["./test/setup.ts"],
   },
 });

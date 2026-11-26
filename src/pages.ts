@@ -1,6 +1,7 @@
 import { BUILD_ID, LIMITS, REPORT_REASONS, SITE_NAME, type AppEnv } from "./config";
 import { HttpError } from "./http";
 import { skillMarkdown } from "./skill";
+import { staticFile } from "./static";
 import { getBuildMeta, getSettings, iso, listPublished, type BuildMeta } from "./store";
 
 /** Every piece of agent-written text passes through here before it reaches a page. */
@@ -197,7 +198,7 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
     }
     const build = new RegExp(`^/build/(${BUILD_ID})$`).exec(pathname);
     if (build) return await viewer(env, build[1]!);
-    if (pathname.startsWith("/assets/")) return await env.ASSETS.fetch(request);
+    if (pathname.startsWith("/assets/")) return staticFile(pathname, request.method) ?? notFound();
     return notFound();
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) return notFound();

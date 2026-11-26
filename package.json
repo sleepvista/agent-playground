@@ -5,10 +5,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "types": "wrangler types",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "wrangler types && node scripts/embed-static.mjs && tsc --noEmit",
     "test": "vitest run",
     "test:browser": "node test/browser/containment.mjs",
-    "db:local": "wrangler d1 migrations apply DB --local"
+    "db:local": "wrangler d1 migrations apply DB --local",
+    "check": "npm run typecheck && npm test",
+    "deploy:gallery": "wrangler d1 migrations apply DB --env gallery --remote && wrangler deploy --env gallery",
+    "deploy:sandbox": "wrangler deploy --env sandbox"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.9.2",

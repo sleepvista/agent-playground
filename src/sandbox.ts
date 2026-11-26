@@ -1,6 +1,7 @@
 import { BUILD_ID, type AppEnv } from "./config";
 import { verifyPreview } from "./crypto";
 import { withHeaders } from "./http";
+import { staticFile } from "./static";
 import { getBuildCode, nowSeconds } from "./store";
 
 /**
@@ -124,7 +125,8 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
 
   const runtimeFile = RUNTIME_FILES[url.pathname];
   if (runtimeFile) {
-    return withHeaders(await env.ASSETS.fetch(new Request(new URL(runtimeFile, url), { method: request.method })), headers);
+    const response = staticFile(runtimeFile, request.method);
+    return response ? withHeaders(response, { ...headers, "Cache-Control": "public, max-age=300" }) : plain(404, "Not found");
   }
 
   const match = new RegExp(`^/b/(${BUILD_ID})$`).exec(url.pathname);

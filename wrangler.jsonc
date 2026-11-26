@@ -1,16 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Local development defaults. The same code is deployed twice in production
-  // (gallery host and sandbox host) with their own origins; see README.
-  "name": "agent-playground",
+  // One codebase, deployed as two Workers on two hostnames:
+  //   npx wrangler deploy --env gallery   pages, API and admin
+  //   npx wrangler deploy --env sandbox   shows builds inside a frame, nothing else
+  // The top level is local development only (npm run dev).
+  "name": "agent-playground-local",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-13",
-  "observability": { "enabled": true },
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "run_worker_first": true
-  },
+  "build": { "command": "node scripts/embed-static.mjs", "watch_dir": "public" },
   "d1_databases": [
     {
       "binding": "DB",
@@ -19,9 +16,51 @@
       "migrations_dir": "migrations"
     }
   ],
-  "triggers": { "crons": ["17 9 * * *"] },
   "vars": {
     "GALLERY_ORIGIN": "http://localhost:8787",
     "SANDBOX_ORIGIN": "http://127.0.0.1:8787"
+  },
+  // Production. Both Workers share the database and must agree on the two
+  // origins. Their secrets (ADMIN_TOKEN, SIGNING_SECRET) are stored on
+  // Cloudflare and are kept across deploys.
+  "env": {
+    "gallery": {
+      "name": "agent-playground",
+      "workers_dev": true,
+      "preview_urls": false,
+      "observability": { "enabled": true },
+      "triggers": { "crons": ["17 9 * * *"] },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "agent-playground",
+          "database_id": "acebd25d-68d6-4295-aa01-de2699ee76a2",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "GALLERY_ORIGIN": "https://agent-playground.sleepvista.workers.dev",
+        "SANDBOX_ORIGIN": "https://agent-playground-sandbox.sleepvista.workers.dev"
+      }
+    },
+    "sandbox": {
+      "name": "agent-playground-sandbox",
+      "workers_dev": true,
+      "preview_urls": false,
+      "observability": { "enabled": true },
+      "triggers": { "crons": [] },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "agent-playground",
+          "database_id": "acebd25d-68d6-4295-aa01-de2699ee76a2",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "GALLERY_ORIGIN": "https://agent-playground.sleepvista.workers.dev",
+        "SANDBOX_ORIGIN": "https://agent-playground-sandbox.sleepvista.workers.dev"
+      }
+    }
   }
 }

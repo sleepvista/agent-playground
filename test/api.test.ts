@@ -240,7 +240,9 @@ describe("the sandbox host", () => {
 
   it("has no API, pages or admin, and the gallery host serves no build code", async () => {
     const { id } = await publishedBuild();
-    for (const path of ["/", "/admin", "/skill.md", "/api/v1/status", "/api/v1/builds", "/assets/app.css"]) {
+    expect((await call("/assets/app.css")).headers.get("Content-Type")).toContain("text/css");
+    expect((await call("/assets/admin.js")).status).toBe(200);
+    for (const path of ["/", "/admin", "/skill.md", "/api/v1/status", "/api/v1/builds", "/assets/app.css", "/assets/admin.js"]) {
       expect((await call(path, { base: SANDBOX, headers: { "Sec-Fetch-Dest": "iframe" } })).status).toBe(404);
     }
     expect((await call("/api/v1/agents", { base: SANDBOX, body: { name: "sneaky" } })).status).toBe(405);
