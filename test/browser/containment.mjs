@@ -4,6 +4,11 @@
 // server" never received a single request or packet.
 //
 // Run with: npm run test:browser   (needs Playwright's Chromium available)
+//
+// By default it starts a throwaway local copy. To check a deployed site, set
+// TARGET_GALLERY, TARGET_SANDBOX and TARGET_ADMIN_TOKEN. Against a deployed
+// site it opens submissions for the length of the run, then puts the settings
+// back and bans the test agents it created.
 import { spawn } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import dgram from "node:dgram";
@@ -18,10 +23,12 @@ const root = path.resolve(import.meta.dirname, "../..");
 const PORT = 8791;
 const CANARY_PORT = 8792;
 const PROBE_PORT = 8793;
-const GALLERY = `http://localhost:${PORT}`;
-const SANDBOX = `http://127.0.0.1:${PORT}`;
+const live = Boolean(process.env.TARGET_GALLERY);
+const GALLERY = process.env.TARGET_GALLERY ?? `http://localhost:${PORT}`;
+const SANDBOX = process.env.TARGET_SANDBOX ?? `http://127.0.0.1:${PORT}`;
 const CANARY = `http://localhost:${CANARY_PORT}`;
-const ADMIN_TOKEN = "containment-admin-token-0123456789abcdef";
+const ADMIN_TOKEN = process.env.TARGET_ADMIN_TOKEN ?? "containment-admin-token-0123456789abcdef";
+const runId = Date.now().toString(36);
 const persistDir = path.join(root, ".wrangler/containment-test");
 
 const failures = [];
@@ -83,7 +90,8 @@ async function api(pathname, { body, key, ip } = {}) {
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
       ...(key ? { Authorization: `Bearer ${key}` } : {}),
-      ...(ip ? { "CF-Connecting-IP": ip } : {}),
+      // A deployed site sits behind Cloudflare, which rejects any request that tries to supply this header.
+      ...(ip && !live ? { "CF-Connecting-IP": ip } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -94,28 +102,35 @@ async function api(pathname, { body, key, ip } = {}) {
 
 let server;
 let browser;
+let settingsBefore;
+const createdAgents = [];
 try {
-  rmSync(persistDir, { recursive: true, force: true });
   await new Promise((resolve) => canary.listen(CANARY_PORT, resolve));
   await new Promise((resolve) => probeTcp.listen(PROBE_PORT, resolve));
   await new Promise((resolve) => probeUdp.bind(PROBE_PORT, resolve));
-  await run(["wrangler", "d1", "migrations", "apply", "DB", "--local", "--persist-to", persistDir]);
-  server = spawn(
-    "npx",
-    [
-      "wrangler", "dev", "--port", String(PORT), "--ip", "0.0.0.0", "--persist-to", persistDir,
-      "--var", `GALLERY_ORIGIN:${GALLERY}`, "--var", `SANDBOX_ORIGIN:${SANDBOX}`, "--var", `ADMIN_TOKEN:${ADMIN_TOKEN}`,
-    ],
-    { cwd: root, stdio: "ignore", detached: true },
-  );
+  if (!live) {
+    rmSync(persistDir, { recursive: true, force: true });
+    await run(["wrangler", "d1", "migrations", "apply", "DB", "--local", "--persist-to", persistDir]);
+    server = spawn(
+      "npx",
+      [
+        "wrangler", "dev", "--port", String(PORT), "--ip", "0.0.0.0", "--persist-to", persistDir,
+        "--var", `GALLERY_ORIGIN:${GALLERY}`, "--var", `SANDBOX_ORIGIN:${SANDBOX}`, "--var", `ADMIN_TOKEN:${ADMIN_TOKEN}`,
+      ],
+      { cwd: root, stdio: "ignore", detached: true },
+    );
+  }
   await waitForServer();
 
   // Seed: open the site, then submit and approve three bad builds.
+  settingsBefore = (await api("/api/admin/overview", { key: ADMIN_TOKEN })).settings;
   await api("/api/admin/settings", { key: ADMIN_TOKEN, body: { registrations_open: true, submissions_open: true } });
   let seeded = 0;
-  async function publish(name, code) {
-    const ip = `192.0.2.${++seeded}`;
+  async function publish(label, code) {
+    const name = `${label}-${runId}`;
+    const ip = `192.0.2.${++seeded}`; // only a local copy accepts a made-up address
     const agent = await api("/api/v1/agents", { body: { name }, ip });
+    createdAgents.push(agent.agent.id);
     const { build } = await api("/api/v1/builds", { key: agent.api_key, ip, body: { title: name, note: "", code } });
     await api(`/api/admin/builds/${build.id}`, { key: ADMIN_TOKEN, body: { action: "approve" } });
     return build.id;
@@ -128,7 +143,8 @@ try {
   const hangId = await publish("hangs-forever", 'canvas.getContext("2d"); on("frame", () => { for (;;) {} });');
   const crashId = await publish("throws-error", 'canvas.getContext("2d"); on("frame", () => { throw new Error("boom"); });');
 
-  browser = await chromium.launch();
+  const proxy = live && process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY, bypass: "localhost,127.0.0.1" } : undefined;
+  browser = await chromium.launch({ proxy });
   const context = await browser.newContext({ acceptDownloads: true });
   const page = await context.newPage();
   const popups = [];
@@ -208,6 +224,19 @@ try {
   console.error(error);
 } finally {
   await browser?.close();
+  if (live && settingsBefore) {
+    try {
+      await api("/api/admin/settings", {
+        key: ADMIN_TOKEN,
+        body: { registrations_open: settingsBefore.registrations_open, submissions_open: settingsBefore.submissions_open },
+      });
+      for (const id of createdAgents) await api(`/api/admin/agents/${id}`, { key: ADMIN_TOKEN, body: { action: "ban" } });
+      console.log("\nSite settings restored and test agents removed.");
+    } catch (error) {
+      failures.push("could not restore the site after the run");
+      console.error(error);
+    }
+  }
   if (server) {
     try {
       process.kill(-server.pid, "SIGTERM");
