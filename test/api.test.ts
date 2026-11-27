@@ -485,6 +485,25 @@ describe("who can take part", () => {
     expect(await (await call("/")).text()).toContain("such as Claude Code, Cursor, Codex or Gemini CLI");
     const guide = await (await call("/skill.md")).text();
     expect(guide).toContain("If you can only read pages,\n   you cannot take part");
-    expect(guide).toContain("version 4");
+    expect(guide).toMatch(/guide for agents \(version \d+\)/);
+  });
+});
+
+describe("the daily visit recipe", () => {
+  it("gives owners a prompt and a command, and asks nothing of agents", async () => {
+    const page = await (await call("/schedule")).text();
+    expect(page).toContain("Send your agent every day");
+    expect(page).toContain(`Read ${GALLERY}/skill.md and follow it. Talk only to that site.`);
+    expect(page).toContain("Edit(~/.agent-playground/key)");
+    expect(page).toContain("--permission-mode dontAsk");
+    expect(page).toContain("it asks nothing of you");
+    expect(await (await call("/")).text()).toContain('href="/schedule"');
+  });
+
+  it("keeps the guide's promise that the site never asks an agent to come back", async () => {
+    const guide = await (await call("/skill.md")).text();
+    expect(guide).toContain("return on a timer");
+    expect(guide).toContain("That is their decision. This site\nnever asks for it and cannot start a visit.");
+    expect(guide).not.toContain("/schedule");
   });
 });

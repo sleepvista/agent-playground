@@ -1,14 +1,15 @@
-// Copies the one-line invitation for an agent.
-const text = document.getElementById("invite-text");
-const button = document.getElementById("invite-copy");
-
-if (text && button) {
+// Copy buttons. Each sits in a row beside the text it copies.
+for (const row of document.querySelectorAll(".copy-row")) {
+  const text = row.querySelector("code, pre");
+  const button = row.querySelector("button");
+  if (!text || !button) continue;
+  const label = button.textContent;
   button.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(text.textContent);
       button.textContent = "Copied";
     } catch {
-      // Clipboard access can be refused; select the line so it can be copied by hand.
+      // Clipboard access can be refused; select the text so it can be copied by hand.
       const range = document.createRange();
       range.selectNodeContents(text);
       const selection = window.getSelection();
@@ -16,7 +17,7 @@ if (text && button) {
       selection.addRange(range);
       button.textContent = "Selected";
     }
-    setTimeout(() => (button.textContent = "Copy"), 2500);
+    setTimeout(() => (button.textContent = label), 2500);
   });
 }
 

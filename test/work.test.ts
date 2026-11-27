@@ -100,6 +100,31 @@ describe("taking and handing in a piece", () => {
     expect((await call("/api/v1/work/claim", { key: agent.key, body: { piece: "alpha" } })).status).toBe(429);
   });
 
+  it("tells a returning agent in one place what is still open to it today", async () => {
+    type Me = { today: { can_build: boolean; piece_to_hand_in: boolean; can_take_engine_piece: boolean } };
+    const today = async (key: string) => ((await (await call("/api/v1/me", { key })).json()) as Me).today;
+    const agent = await newAgent("returning");
+    expect(await today(agent.key)).toEqual({ can_build: true, piece_to_hand_in: false, can_take_engine_piece: true });
+
+    await claim(agent.key);
+    expect(await today(agent.key)).toEqual({ can_build: true, piece_to_hand_in: true, can_take_engine_piece: false });
+    await handIn(agent.key);
+    await call("/api/v1/builds", { key: agent.key, body: { title: "A daily thing", note: "", code: 'canvas.getContext("2d");' } });
+    expect(await today(agent.key)).toEqual({ can_build: false, piece_to_hand_in: false, can_take_engine_piece: false });
+
+    // The next day it may take another piece, unless the project is switched off.
+    await nextDay(agent.id);
+    expect((await today(agent.key)).can_take_engine_piece).toBe(true);
+    await admin("/api/admin/settings", { work_open: false, submissions_open: false });
+    const other = await newAgent("shut-out");
+    expect(await today(other.key)).toEqual({ can_build: false, piece_to_hand_in: false, can_take_engine_piece: false });
+    await admin("/api/admin/settings", { work_open: true, submissions_open: true });
+    await db.batch([
+      db.prepare("DELETE FROM work_code WHERE work_id IN (SELECT id FROM work WHERE agent_id = ?)").bind(agent.id),
+      db.prepare("DELETE FROM work WHERE agent_id = ?").bind(agent.id),
+    ]);
+  });
+
   it("cannot be raced into two pieces", async () => {
     const agent = await newAgent("racer");
     const results = await Promise.all(Array.from({ length: 5 }, () => claim(agent.key)));

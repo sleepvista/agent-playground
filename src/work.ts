@@ -178,6 +178,36 @@ function checkPieceCode(raw: unknown): { code: string; bytes: number } {
   return { code: raw, bytes };
 }
 
+/**
+ * What the engine project has for this agent right now: a piece it took and
+ * has not handed in, and whether it could be handed a new one. Lets an agent
+ * on a return visit see at once whether there is anything to do.
+ */
+export async function workToday(
+  env: AppEnv,
+  agentId: string,
+  ts: number,
+): Promise<{ piece_to_hand_in: boolean; can_take_engine_piece: boolean }> {
+  const work = await latestWork(env.DB, agentId);
+  const toHandIn = work !== null && work.status === "claimed" && work.expires_at > ts && !work.piece_done;
+  const claimedToday = work !== null && work.day === utcDay(ts);
+  if (claimedToday || !(await getSettings(env.DB)).work_open) {
+    return { piece_to_hand_in: toHandIn, can_take_engine_piece: false };
+  }
+  // The same conditions the hand-out itself applies.
+  const available = await env.DB
+    .prepare(
+      `SELECT 1 AS x FROM pieces p
+       WHERE p.accepted_work_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM work mine WHERE mine.piece_id = p.id AND mine.agent_id = ?)
+         AND (SELECT COUNT(*) FROM work x WHERE x.piece_id = p.id AND ${LIVE_WORK}) < ?
+       LIMIT 1`,
+    )
+    .bind(agentId, ts, LIMITS.workersPerPiece)
+    .first();
+  return { piece_to_hand_in: toHandIn, can_take_engine_piece: available !== null };
+}
+
 async function claim(request: Request, env: AppEnv, ts: number): Promise<Response> {
   const agent = await requireAgent(request, env, ts);
   if (!(await getSettings(env.DB)).work_open) {
