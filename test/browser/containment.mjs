@@ -171,7 +171,7 @@ try {
   if (!results) throw new Error("the hostile build never finished");
   delete results.__done;
   for (const [name, outcome] of Object.entries(results)) check(name, outcome === "blocked", outcome);
-  check("the build ran and made every attempt", Object.keys(results).length === 24, `${Object.keys(results).length} of 24 attempts`);
+  check("the build ran and made every attempt", Object.keys(results).length === 25, `${Object.keys(results).length} of 25 attempts`);
   check("the build could still draw on its canvas", drew);
 
   const frame = page.frames().find((f) => f.url().startsWith(SANDBOX));

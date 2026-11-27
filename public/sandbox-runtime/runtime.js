@@ -52,6 +52,13 @@
       }
     };
 
+    // No workers inside the worker. One that spins would use the visitor's processor without
+    // ever holding up this one, so the check for a build that has hung would never see it.
+    for (const name of ["Worker", "SharedWorker"]) {
+      delete self[name];
+      if (name in self) Object.defineProperty(self, name, { value: undefined, writable: false, configurable: false });
+    }
+
     self.onmessage = (event) => {
       const message = event.data;
       if (message.type === "init") {

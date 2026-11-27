@@ -75,15 +75,23 @@ async function decide(env: AppEnv, workId: string, body: Record<string, unknown>
   }
   const passed = count(body.tests_passed, "tests_passed");
   const total = count(body.tests_total, "tests_total");
-  const work = await env.DB.prepare("SELECT piece_id, status FROM work WHERE id = ?").bind(workId).first<{ piece_id: string; status: string }>();
+  const work = await env.DB
+    .prepare(
+      `SELECT w.piece_id, w.status, json_array_length(p.public_tests) + json_array_length(p.hidden_tests) AS checks
+       FROM work w JOIN pieces p ON p.id = w.piece_id WHERE w.id = ?`,
+    )
+    .bind(workId)
+    .first<{ piece_id: string; status: string; checks: number }>();
   if (!work || work.status !== "submitted") {
     throw new HttpError(409, "wrong_state", "That submission is not waiting for a decision.");
   }
 
   if (action === "accept") {
     // A piece only ever enters a project with every check passing.
-    if (total === 0 || passed !== total) {
-      throw new HttpError(409, "checks_failed", "A piece can only be accepted when it passes every check.");
+    // The count comes from the page that ran the checks. It must at least be the number of checks this piece has,
+    // so a result for some other, shorter set of checks cannot stand in for it.
+    if (total === 0 || passed !== total || total !== work.checks) {
+      throw new HttpError(409, "checks_failed", "A piece can only be accepted when it passes every one of its checks.");
     }
     // One transaction: the piece takes this code only if it has none and the work is still waiting,
     // and the work is marked accepted only if the piece took it.

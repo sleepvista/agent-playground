@@ -46,6 +46,7 @@ const attempt = async (name, fn) => {
     return true;
   });
   await attempt("call the gallery api", () => fetch("__GALLERY__/api/v1/status").then(() => true));
+  await attempt("starting a worker of its own", () => typeof Worker !== "undefined" || typeof SharedWorker !== "undefined");
   await attempt("network from a nested worker", () => new Promise((resolve, reject) => {
     const source = `fetch("${CANARY}/hit/nested").then(() => postMessage("out"), () => postMessage("stuck"))`;
     const nested = new Worker(URL.createObjectURL(new Blob([source])));

@@ -281,6 +281,9 @@ describe("checking and accepting a piece", () => {
 
     expect(await code(await decide(first.claim.work.id, "accept", 1, 2))).toBe("checks_failed");
     expect(await code(await decide(first.claim.work.id, "accept", 0, 0))).toBe("checks_failed");
+    // A full pass of some shorter or longer set of checks is not a pass of this piece's own two.
+    expect(await code(await decide(first.claim.work.id, "accept", 1, 1))).toBe("checks_failed");
+    expect(await code(await decide(first.claim.work.id, "accept", 3, 3))).toBe("checks_failed");
     expect((await decide(first.claim.work.id, "launch")).status).toBe(400);
     expect((await call(`/api/admin/work/${first.claim.work.id}`, { body: { action: "accept", tests_passed: 2, tests_total: 2 } })).status).toBe(401);
     expect((await decide(first.claim.work.id, "accept")).status).toBe(200);
