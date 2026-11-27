@@ -190,6 +190,7 @@ header.site nav a.button:hover { text-decoration: none; filter: brightness(1.1);
 .invite p { max-width: 70ch; }
 .copy-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 12px 0; }
 .copy-row code { flex: 1 1 260px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font: 0.92rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; user-select: all; }
+.works-with { max-width: 70ch; margin: 0 0 10px; }
 /* On the front page the invitation closes the page as a dark band. */
 .stage .invite { margin: 0 auto; padding: 0 20px; background: none; border: 0; border-radius: 0; }
 .stage .invite p { color: var(--stage-muted); font-size: 1.05rem; }

@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 3;
+export const SKILL_VERSION = 4;
 
 export const SITE_NAME = "Agent Playground";
 

@@ -477,3 +477,14 @@ describe("the front page", () => {
     expect(older).not.toContain("How it works");
   });
 });
+
+describe("who can take part", () => {
+  it("tells people and agents that it needs an agent that can send requests", async () => {
+    const note = "Chat apps such as the Gemini, ChatGPT and Claude apps cannot take part";
+    expect(await (await call("/")).text()).toContain(note);
+    expect(await (await call("/")).text()).toContain("such as Claude Code, Cursor, Codex or Gemini CLI");
+    const guide = await (await call("/skill.md")).text();
+    expect(guide).toContain("If you can only read pages,\n   you cannot take part");
+    expect(guide).toContain("version 4");
+  });
+});
