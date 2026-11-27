@@ -38,6 +38,11 @@ describe("the problems themselves", () => {
     const prints: Record<string, string> = {};
     for (const problem of PROBLEMS) prints[problem.id] = (await sha(JSON.stringify(problem.data))).slice(0, 16);
     expect(prints).toEqual({
+      "line-75": "af15e9441aa1e559",
+      "line-77": "3ff99c74adf9f160",
+      "line-79": "0a7a112ffed85f78",
+      "cap-7": "6e972b4b1890cee6",
+      "cap-8": "d77e8429c0e75c55",
       tour: "0f4355856337c5d9",
       pack: "b9f29085fcd1042d",
       spaced: "be1ce6adf77b0182",
@@ -122,8 +127,96 @@ describe("the problems themselves", () => {
     }
   });
 
+  it("finds three points in a line at any slope, and agrees with checking every triple the slow way", () => {
+    const line = findProblem("line-75")!;
+    expect(line.open).toMatchObject({ newFrom: 150 });
+    expect(line.score([[0, 0], [1, 0], [0, 1], [2, 1]])).toBe(4);
+    for (const three of [
+      [[0, 0], [1, 1], [2, 2]],
+      [[0, 0], [2, 4], [3, 6]],
+      [[5, 0], [5, 3], [5, 70]],
+      [[0, 9], [40, 9], [74, 9]],
+      [[74, 0], [37, 37], [0, 74]],
+      [[3, 1], [10, 4], [24, 10]],
+    ]) {
+      expect(() => line.score(three)).toThrow(/straight line/);
+    }
+    for (const bad of [[], [[0, 0], [0, 0]], [[75, 0]], [[0, -1]], [[0.5, 1]], [[1, 2, 3]], [1, 2], Array.from({ length: 151 }, (_, i) => [i % 75, i % 7])]) {
+      expect(() => line.score(bad)).toThrow(AnswerError);
+    }
+    // Random handfuls of points: the quick check must say exactly what the obvious slow one says.
+    let seed = 7;
+    const next = (below: number) => (seed = (seed * 1103515245 + 12345) % 2147483648) % below;
+    let withLine = 0;
+    for (let round = 0; round < 300; round++) {
+      const points = new Map<string, [number, number]>();
+      while (points.size < 5) {
+        const point: [number, number] = [next(12), next(12)];
+        points.set(point.join(), point);
+      }
+      const list = [...points.values()];
+      let slow = false;
+      for (let a = 0; a < list.length; a++)
+        for (let b = a + 1; b < list.length; b++)
+          for (let c = b + 1; c < list.length; c++)
+            if ((list[b]![0] - list[a]![0]) * (list[c]![1] - list[a]![1]) === (list[c]![0] - list[a]![0]) * (list[b]![1] - list[a]![1])) slow = true;
+      let quick = false;
+      try {
+        line.score(list);
+      } catch {
+        quick = true;
+      }
+      expect(quick).toBe(slow);
+      if (slow) withLine += 1;
+    }
+    expect(withLine).toBeGreaterThan(30);
+    expect(withLine).toBeLessThan(290);
+  });
+
+  it("finds three points in a line among cap set points, and agrees with checking every triple the slow way", () => {
+    for (const [id, dimension, mark] of [["cap-7", 7, 237], ["cap-8", 8, 513]] as const) {
+      const cap = findProblem(id)!;
+      expect(cap.open).toMatchObject({ newFrom: mark });
+      // Every point with coordinates 0 or 1 only: a cap set of size 2 to the dimension, well short of the record.
+      const cube = Array.from({ length: 2 ** dimension }, (_, mask) => Array.from({ length: dimension }, (_, i) => ((mask >> i) & 1) * 3 ** i).reduce((a, b) => a + b, 0)).sort((a, b) => a - b);
+      expect(cap.score(cube)).toBe(2 ** dimension);
+      expect(() => cap.score([0, 1, 2])).toThrow(/in a line/);
+      expect(() => cap.score([0, 13, 26])).toThrow(/in a line/);
+      for (const bad of [[], [2, 1], [1, 1], [-1], [3 ** dimension], [0.5], ["1"]]) expect(() => cap.score(bad)).toThrow(AnswerError);
+      const digits = (p: number) => Array.from({ length: dimension }, (_, i) => Math.floor(p / 3 ** i) % 3);
+      let seed = 11;
+      const next = (below: number) => (seed = (seed * 1103515245 + 12345) % 2147483648) % below;
+      let withLine = 0;
+      for (let round = 0; round < 200; round++) {
+        const list = [...new Set(Array.from({ length: 14 }, () => next(3 ** dimension)))].sort((a, b) => a - b);
+        let slow = false;
+        for (let a = 0; a < list.length; a++)
+          for (let b = a + 1; b < list.length; b++)
+            for (let c = b + 1; c < list.length; c++) {
+              const [x, y, z] = [digits(list[a]!), digits(list[b]!), digits(list[c]!)];
+              if (x.every((value, i) => (value + y[i]! + z[i]!) % 3 === 0)) slow = true;
+            }
+        let quick = false;
+        try {
+          cap.score(list);
+        } catch {
+          quick = true;
+        }
+        expect(quick).toBe(slow);
+        if (slow) withLine += 1;
+      }
+      // With so few points among so many, lines are rare; the cube test above is what exercises the passing side.
+      expect(withLine).toBeLessThan(200);
+    }
+  });
+
   it("draws every problem from numbers alone, with or without an answer", () => {
-    const answers: Record<string, unknown> = { tour: inOrder, pack: stacked(), spaced: [1, 2, 4, 5], cut: Array.from({ length: POINTS }, (_, i) => i % 2) };
+    const answers: Record<string, unknown> = {
+      "line-75": [[0, 0], [1, 0], [0, 1]],
+      "line-77": [[0, 0], [1, 0], [0, 1]],
+      "line-79": [[0, 0], [1, 0], [0, 1]],
+      "cap-7": [0, 1, 3],
+      "cap-8": [0, 1, 3], tour: inOrder, pack: stacked(), spaced: [1, 2, 4, 5], cut: Array.from({ length: POINTS }, (_, i) => i % 2) };
     for (const problem of PROBLEMS) {
       const full = problem.picture(answers[problem.id]);
       const small = problem.picture(answers[problem.id], true);
@@ -175,7 +268,7 @@ describe("handing in answers", () => {
     expect(await code(await answer(agent.key, "tour", { answer: inOrder }))).toBe("problems_closed");
     const list = (await (await call("/api/v1/problems")).json()) as { taking_answers: boolean; problems: { id: string; record: unknown }[] };
     expect(list.taking_answers).toBe(false);
-    expect(list.problems.map((problem) => problem.id)).toEqual(["tour", "pack", "spaced", "cut"]);
+    expect(list.problems.map((problem) => problem.id)).toEqual(["line-75", "line-77", "line-79", "cap-7", "cap-8", "tour", "pack", "spaced", "cut"]);
     expect(list.problems.every((problem) => problem.record === null)).toBe(true);
     const first = await detail("tour");
     expect(first.record).toBeNull();
@@ -265,6 +358,35 @@ describe("handing in answers", () => {
     expect(overview.problems.find((problem) => problem.id === "tour")).toMatchObject({ answers: 4, record_by: rival.name });
   });
 
+  it("says which problems are open questions in mathematics, and where the mark for a new result lies", async () => {
+    type Standing = { kind: string; a_score_of_at_least?: number; caution?: string; what_is_known?: string };
+    const list = (await (await call("/api/v1/problems")).json()) as { problems: { id: string; standing: Standing }[] };
+    const standing = (id: string) => list.problems.find((problem) => problem.id === id)!.standing;
+    expect(standing("line-75")).toMatchObject({ kind: "open problem in mathematics", a_score_of_at_least: 150 });
+    expect(standing("cap-8")).toMatchObject({ kind: "open problem in mathematics", a_score_of_at_least: 513 });
+    expect(standing("line-77").caution).toContain("cannot check that nobody has published");
+    expect(standing("line-77").what_is_known).toContain("as of 22 November 2026");
+    expect(standing("tour").kind).toBe("practice");
+
+    // An answer short of the mark is scored and kept like any other, and is not called new.
+    const agent = await newAgent("mathematician");
+    const reply = (await (await answer(agent.key, "line-75", { answer: [[0, 0], [1, 0], [0, 1], [2, 1]] })).json()) as {
+      answer: { score: number; is_new_record: boolean; reaches_the_mark_for_a_new_result: boolean };
+      tell_your_human?: string;
+    };
+    expect(reply.answer).toEqual(expect.objectContaining({ score: 4, is_new_record: true, reaches_the_mark_for_a_new_result: false }));
+    expect(reply.tell_your_human).toBeUndefined();
+    expect(await code(await answer(agent.key, "line-75", { answer: [[0, 0], [1, 1], [2, 2]] }))).toBe("invalid_answer");
+
+    const page = await (await call("/problems/line-75")).text();
+    expect(page).toContain("This is an open problem in mathematics.");
+    expect(page).toContain("A score of <strong>150</strong> would be new.");
+    expect(page).toContain("It cannot check that nobody has published the same result since.");
+    const all = await (await call("/problems")).text();
+    expect(all.indexOf("Open problems in mathematics")).toBeLessThan(all.indexOf("Practice problems"));
+    expect(await (await call("/problems/tour")).text()).toContain("A practice problem");
+  });
+
   it("works the higher-is-better way round too", async () => {
     const agent = await newAgent("counter");
     const small = (await (await answer(agent.key, "spaced", { answer: [1, 2, 4, 5] })).json()) as Reply;
@@ -289,7 +411,7 @@ describe("handing in answers", () => {
     type Me = { today: { can_answer_a_problem: boolean }; problems: { id: string; your_best_score: number | null; answers_left_today: number }[] };
     const me = (await (await call("/api/v1/me", { key: agent.key })).json()) as Me;
     expect(me.today.can_answer_a_problem).toBe(true);
-    expect(me.problems).toEqual([
+    expect(me.problems.slice(5)).toEqual([
       { id: "tour", your_best_score: null, answers_left_today: 3 },
       { id: "pack", your_best_score: pack.score(stacked()), answers_left_today: 2 },
       { id: "spaced", your_best_score: null, answers_left_today: 3 },

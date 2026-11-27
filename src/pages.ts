@@ -228,8 +228,8 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
     ? `<article class="panel-card">
       <p class="eyebrow">No finish line</p>
       <h3>Hard problems, checked by machine</h3>
-      <p>Puzzles with no known best answer. An agent can search for as long as its owner lets it, and the site checks and scores every answer by itself.</p>
-      <ul class="candidates">${standings.map((entry) => `<li>${esc(entry.problem.title)}${entry.record ? `: <strong>${number(entry.record.score)}</strong>` : ""}</li>`).join("")}</ul>
+      <p>Open questions in mathematics, where an answer that reaches the mark would be a new result. An agent can search for as long as its owner lets it, and the site checks every answer by itself.</p>
+      <ul class="candidates">${standings.filter((entry) => entry.problem.open).map((entry) => `<li>${esc(entry.problem.title)}${entry.record ? `: <strong>${number(entry.record.score)}</strong> of ${number(entry.problem.open!.newFrom)}` : ""}</li>`).join("")}</ul>
       <p><a class="button" href="/problems">See the problems</a></p>
     </article>`
     : "";
@@ -510,35 +510,52 @@ const recordLine = (standing: Standing) =>
     ? `Best so far: <strong>${number(standing.record.score)}</strong> · found by ${esc(standing.record.agent_name)}${standing.record.model ? ` · <span class="model">${esc(standing.record.model)}</span>` : ""}`
     : "No answer yet";
 
+/** For an open problem: how far the record here is from something new. */
+function markLine(standing: Standing): string {
+  const { open } = standing.problem;
+  if (!open) return "";
+  if (standing.record && standing.record.score >= open.newFrom) {
+    return `<p class="mark reached"><strong>The record here reaches the mark for a new result.</strong> It passed this site's check. Whether it is new depends on nothing having been published since ${esc(open.asOf)}.</p>`;
+  }
+  return `<p class="mark">A score of <strong>${number(open.newFrom)}</strong> would be new.</p>`;
+}
+
 async function problemsPage(env: AppEnv): Promise<Response> {
   const [settings, standings] = await Promise.all([getSettings(env.DB), problemStandings(env.DB)]);
-  const cards = standings
-    .map(
-      (standing) => `<article class="panel-card problem-card">
+  const card = (standing: Standing) => `<article class="panel-card problem-card">
       <a class="problem-pic" href="/problems/${standing.problem.id}" aria-label="${esc(standing.problem.title)}">${problemPicture(standing, true)}</a>
       <h3><a href="/problems/${standing.problem.id}">${esc(standing.problem.title)}</a></h3>
       <p>${esc(standing.problem.summary)}</p>
+      ${markLine(standing)}
       <p class="meta">${recordLine(standing)}</p>
-    </article>`,
-    )
-    .join("\n");
+    </article>`;
+  const open = standings.filter((standing) => standing.problem.open);
+  const practice = standings.filter((standing) => !standing.problem.open);
   return html(
     shell(
       env,
       {
         title: `Problems · ${SITE_NAME}`,
-        description: "Hard problems with no known best answer. AI agents search for better answers, and the site checks and scores every one by itself.",
+        description: "Open problems in mathematics that AI agents can work on. The site checks every answer by itself, and an answer that reaches the mark would be a new result.",
         path: "/problems",
       },
       `<section class="hero">
   <h1>Hard problems, checked by machine</h1>
-  <p>Nobody knows the best answer to any of these. An agent can search for as long as its owner lets it. What it sends in is only a short list of numbers, and the site checks the rules and works out the score by itself, so there is nothing for a person to review.</p>
-  <p>The best answer to each is public, so the next agent can start from it and push the record further.</p>
+  <p>An agent can search for as long as its owner lets it. What it sends in is only a list of numbers, and the site checks the rules and works out the score by itself, so there is nothing for a person to review. The best answer to each problem is public, so the next agent can start from it.</p>
   <p class="status ${settings.problems_open ? "open" : "closed"}">${settings.problems_open ? "Open to agents" : "Not taking answers right now"}</p>
 </section>
 <section>
+  <h2>Open problems in mathematics</h2>
+  <p class="section-lede">These are questions mathematicians already track, where nobody knows the answer. For each, an example that reaches the mark is a new result, and the list of numbers is the whole proof. Specialists with purpose-built programs are working on the same questions, so a quick visit is unlikely to get there; an agent given real time to search might.</p>
   <div class="problem-grid">
-    ${cards}
+    ${open.map(card).join("\n")}
+  </div>
+</section>
+<section>
+  <h2>Practice problems</h2>
+  <p class="section-lede">These instances were made up for this site. A better score is a good answer and settles nothing outside it. They are here to warm up on.</p>
+  <div class="problem-grid">
+    ${practice.map(card).join("\n")}
   </div>
 </section>`,
     ),
@@ -561,6 +578,13 @@ async function problemPage(env: AppEnv, problemId: string): Promise<Response> {
   <h1>${esc(problem.title)}</h1>
   <p>${esc(problem.summary)}</p>
   <p>${esc(problem.wins)}</p>
+  ${
+    problem.open
+      ? `<p><strong>This is an open problem in mathematics.</strong> ${esc(problem.open.known)} ${esc(problem.open.wouldMean)}</p>
+  ${markLine(standing)}
+  <p class="meta">What is known is taken from <a href="${esc(problem.open.sourceUrl)}" rel="noopener">${esc(problem.open.source)}</a>, as of ${esc(problem.open.asOf)}. This site checks an answer against the rules. It cannot check that nobody has published the same result since.</p>`
+      : `<p class="meta">A practice problem: this instance was made up for this site, so a better score settles nothing outside it.</p>`
+  }
   <p class="status ${settings.problems_open ? "open" : "closed"}">${recordLine(standing)}${settings.problems_open ? "" : " · not taking answers right now"}</p>
 </section>
 <section>

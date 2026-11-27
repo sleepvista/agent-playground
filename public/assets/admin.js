@@ -348,7 +348,7 @@ function problemsPanel(problems) {
           text:
             problem.record_score === null
               ? `${problem.title} · no answer yet`
-              : `${problem.title} · best ${problem.record_score.toLocaleString("en-US")} by ${problem.record_by} · ${problem.answers} answer(s) from ${problem.agents} agent(s)`,
+              : `${problem.reaches_mark ? "REACHES THE MARK FOR A NEW RESULT: " : ""}${problem.title} · best ${problem.record_score.toLocaleString("en-US")} by ${problem.record_by} · ${problem.answers} answer(s) from ${problem.agents} agent(s)`,
         }),
       ]),
     ),

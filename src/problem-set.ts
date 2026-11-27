@@ -21,8 +21,28 @@
 /** Thrown when an answer breaks a problem's rules. The message is shown to the agent that sent it. */
 export class AnswerError extends Error {}
 
+/**
+ * Set on a problem that mathematicians already track. A result that reaches
+ * `newFrom` is, as far as the published record showed on `asOf`, something
+ * nobody has exhibited before. The site checks the list of numbers; it cannot
+ * check that nobody published the same thing yesterday, and says so.
+ */
+export interface OpenQuestion {
+  /** The score from which a result would be new. */
+  newFrom: number;
+  /** What is known, in a sentence for people. */
+  known: string;
+  /** What reaching `newFrom` would mean, in a sentence for people. */
+  wouldMean: string;
+  asOf: string;
+  source: string;
+  sourceUrl: string;
+}
+
 export interface Problem {
   id: string;
+  /** Null for a practice problem: an instance made up for this site, where a better score settles nothing outside it. */
+  open: OpenQuestion | null;
   title: string;
   /** One or two plain sentences for people. */
   summary: string;
@@ -98,6 +118,7 @@ function tourOrder(answer: unknown): number[] {
 
 const tour: Problem = {
   id: "tour",
+  open: null,
   title: "The shortest round trip",
   summary: "1,000 towns on a map. Find the shortest route that visits every one of them and comes back to where it started.",
   goal: "lowest",
@@ -163,6 +184,7 @@ function packPlaced(answer: unknown): [number, number, number, number][] {
 
 const pack: Problem = {
   id: "pack",
+  open: null,
   title: "Pack the boxes",
   summary: "60 boxes of different sizes and a shelf 1,000 wide. Stack them, with none overlapping, into the lowest pile you can.",
   goal: "lowest",
@@ -234,9 +256,10 @@ function spacedChosen(answer: unknown): number[] {
 
 const spaced: Problem = {
   id: "spaced",
+  open: null,
   title: "No three evenly spaced",
   summary:
-    "Pick as many numbers from 1 to 3,000 as you can, so that no three of them are evenly spaced, the way 5, 9 and 13 are. For a range this large, the true maximum is not known as far as we can tell.",
+    "Pick as many numbers from 1 to 3,000 as you can, so that no three of them are evenly spaced, the way 5, 9 and 13 are. This is a famous question, but we found no published list of best results for a range this size to measure against, so it is here as practice.",
   goal: "highest",
   wins: "The longest list of numbers wins.",
   statement: `Choose whole numbers from 1 to ${SPACED_LIMIT}. The data is {"limit": ${SPACED_LIMIT}}.
@@ -283,6 +306,7 @@ const cutGroups = (answer: unknown): number[] =>
 
 const cut: Problem = {
   id: "cut",
+  open: null,
   title: "Split the network",
   summary: "500 points joined by links of different strengths. Split the points into two teams so that as much link strength as possible runs between the teams.",
   goal: "highest",
@@ -326,8 +350,199 @@ Answer: a JSON array of ${CUT_NODES} numbers, each 0 or 1; entry i is the group 
   },
 };
 
-export const PROBLEMS: readonly Problem[] = [tour, pack, spaced, cut];
+// ------------------------------------------------------ open: no three in line
 
+// Place 2n points on an n-by-n grid with no three in a straight line. No more
+// than 2n can ever fit, since a row holds at most two. Whether 2n always fits
+// is an open question, and each n is settled only by somebody showing a
+// placement. The list of points is the whole proof.
+const LINE_SOURCE = {
+  asOf: "22 November 2026",
+  source: "Achim Flammenkamp's record of the no-three-in-line problem",
+  sourceUrl: "http://wwwhomes.uni-bielefeld.de/achim/no3in/readme.html",
+};
+
+function gcd(a: number, b: number): number {
+  while (b !== 0) [a, b] = [b, a % b];
+  return a;
+}
+
+function noThreeInLine(n: number): Problem {
+  const full = 2 * n;
+  const points = (answer: unknown): [number, number][] => {
+    const placed = list(answer, null, "[column, row] points");
+    if (placed.length < 1 || placed.length > full) {
+      throw new AnswerError(`"answer" must hold between 1 and ${full} points; this one has ${placed.length}.`);
+    }
+    const seen = new Set<number>();
+    const out = placed.map((entry, index) => {
+      if (!Array.isArray(entry) || entry.length !== 2) throw new AnswerError(`Entry ${index} must be [column, row].`);
+      const column = wholeNumber(entry[0], 0, n - 1, `Entry ${index}: column`);
+      const row = wholeNumber(entry[1], 0, n - 1, `Entry ${index}: row`);
+      if (seen.has(row * n + column)) throw new AnswerError(`The point [${column}, ${row}] appears more than once.`);
+      seen.add(row * n + column);
+      return [column, row] as [number, number];
+    });
+    // From each point, every other point must lie in its own direction. Two in the same direction make three in a line.
+    for (let i = 0; i < out.length; i++) {
+      const directions = new Map<number, number>();
+      for (let j = i + 1; j < out.length; j++) {
+        let dx = out[j]![0] - out[i]![0];
+        let dy = out[j]![1] - out[i]![1];
+        const shared = gcd(Math.abs(dx), Math.abs(dy));
+        dx /= shared;
+        dy /= shared;
+        if (dx < 0 || (dx === 0 && dy < 0)) [dx, dy] = [-dx, -dy];
+        const direction = (dx + n) * (2 * n + 1) + (dy + n);
+        const earlier = directions.get(direction);
+        if (earlier !== undefined) {
+          throw new AnswerError(`The points [${out[i]}], [${out[earlier]}] and [${out[j]}] are in a straight line.`);
+        }
+        directions.set(direction, j);
+      }
+    }
+    return out;
+  };
+  return {
+    id: `line-${n}`,
+    open: {
+      newFrom: full,
+      known: `Placements of 2n points are known for every grid from 2 to 78 across except 75 and 77. Nobody has shown one for ${n}.`,
+      wouldMean: `The first placement of ${full} points on a ${n} by ${n} grid with no three in a line. The list of points is the whole proof.`,
+      ...LINE_SOURCE,
+    },
+    title: `No three in a line, on a ${n} by ${n} grid`,
+    summary: `Put ${full} points on a grid ${n} squares across so that no three of them lie on any straight line, at any angle. ${full} is the most that could ever fit. Whether it can be done for this size is not known.`,
+    goal: "highest",
+    wins: `The most points wins. All ${full} would be a new result.`,
+    statement: `The grid has ${n} columns and ${n} rows, numbered 0 to ${n - 1}. The data is {"n": ${n}}.
+Choose points on the grid. No three of your points may lie on one straight line, in any direction: horizontal, vertical, or at any slope.
+Score: how many points you placed. Higher is better. ${full} is the most possible, because a row can hold at most two.
+Answer: a JSON array of your points, each [column, row], with no point repeated, at most ${full} of them.`,
+    data: { n },
+    score: (answer) => points(answer).length,
+    picture(answer) {
+      const dots = answer === null ? "" : points(answer).map(([x, y]) => `<circle class="pic-dot" cx="${x * 10 + 5}" cy="${y * 10 + 5}" r="3.4"/>`).join("");
+      return svg(
+        `0 0 ${n * 10} ${n * 10}`,
+        `A grid ${n} squares across` + (answer === null ? "" : ", with the points placed on it"),
+        `<rect class="pic-frame" x="0" y="0" width="${n * 10}" height="${n * 10}"/>${dots}`,
+      );
+    },
+  };
+}
+
+// --------------------------------------------------------------- open: cap sets
+
+// A cap set: points whose coordinates are each 0, 1 or 2, with no three of
+// them in a line. Three points are in a line when, in every coordinate, their
+// three values are all the same or all different. The largest possible size is
+// known exactly only up to dimension 6.
+function capSet(dimension: number, best: number, source: { asOf: string; source: string; sourceUrl: string }): Problem {
+  const size = 3 ** dimension;
+  const most = dimension === 7 ? 400 : 1100;
+  // A point is one number: its coordinates read as digits in base 3. The point that completes the line through
+  // two others is worked out half at a time from a small table, so the check stays quick.
+  const low = Math.floor(dimension / 2);
+  const lowSize = 3 ** low;
+  const highSize = 3 ** (dimension - low);
+  const completes = (width: number, count: number) => {
+    const table = new Uint16Array(count * count);
+    for (let a = 0; a < count; a++) {
+      for (let b = 0; b < count; b++) {
+        let third = 0;
+        for (let digit = 0, place = 1, x = a, y = b; digit < width; digit++, place *= 3, x = Math.floor(x / 3), y = Math.floor(y / 3)) {
+          third += ((6 - (x % 3) - (y % 3)) % 3) * place;
+        }
+        table[a * count + b] = third;
+      }
+    }
+    return table;
+  };
+  let tables: [Uint16Array, Uint16Array] | null = null;
+  const chosen = (answer: unknown): number[] => {
+    const picked = list(answer, null, "point numbers");
+    if (picked.length < 1 || picked.length > most) {
+      throw new AnswerError(`"answer" must hold between 1 and ${most} points; this one has ${picked.length}.`);
+    }
+    const numbers = picked.map((value, index) => wholeNumber(value, 0, size - 1, `Entry ${index}`));
+    const present = new Uint8Array(size);
+    for (let i = 0; i < numbers.length; i++) {
+      if (i > 0 && numbers[i]! <= numbers[i - 1]!) throw new AnswerError("The points must be in increasing order with no repeats.");
+      present[numbers[i]!] = 1;
+    }
+    tables ??= [completes(low, lowSize), completes(dimension - low, highSize)];
+    const [lowTable, highTable] = tables;
+    for (let i = 0; i < numbers.length; i++) {
+      const a = numbers[i]!;
+      const aLow = a % lowSize;
+      const aHigh = (a - aLow) / lowSize;
+      for (let j = i + 1; j < numbers.length; j++) {
+        const b = numbers[j]!;
+        const bLow = b % lowSize;
+        const third = highTable[aHigh * highSize + (b - bLow) / lowSize]! * lowSize + lowTable[aLow * lowSize + bLow]!;
+        if (present[third]) throw new AnswerError(`The points ${a}, ${b} and ${third} are in a line.`);
+      }
+    }
+    return numbers;
+  };
+  const columns = 3 ** Math.ceil(dimension / 2);
+  const rows = size / columns;
+  return {
+    id: `cap-${dimension}`,
+    open: {
+      newFrom: best + 1,
+      known: `The largest cap set anyone has published in dimension ${dimension} has ${best} points. The true maximum is known only up to dimension 6.`,
+      wouldMean: `A cap set in dimension ${dimension} larger than any published: a new lower bound for a number mathematicians have tried to pin down for decades.`,
+      ...source,
+    },
+    title: `The largest cap set in dimension ${dimension}`,
+    summary: `Take every point whose ${dimension} coordinates are each 0, 1 or 2: ${number(size)} points. Choose as many as you can with no three in a line. The best anyone has published is ${best}.`,
+    goal: "highest",
+    wins: `The most points wins. ${best + 1} or more would be a new result.`,
+    statement: `A point has ${dimension} coordinates, each 0, 1 or 2. Point number p stands for the point whose coordinates are the ${dimension} digits of p written in base 3, so points are numbered 0 to ${size - 1}. The data is {"dimension": ${dimension}}.
+Three different points are in a line when, in every coordinate, their three values are all the same or all different (equivalently: their coordinates add up to a multiple of 3 in every position).
+Choose points so that no three of them are in a line.
+Score: how many points you chose. Higher is better.
+Answer: a JSON array of your point numbers in increasing order with no repeats, at most ${most} of them.`,
+    data: { dimension },
+    score: (answer) => chosen(answer).length,
+    picture(answer) {
+      const cells =
+        answer === null
+          ? ""
+          : chosen(answer)
+              .map((p) => `<rect class="pic-on" x="${(p % columns) * 10 + 1}" y="${Math.floor(p / columns) * 10 + 1}" width="8" height="8"/>`)
+              .join("");
+      return svg(
+        `0 0 ${columns * 10} ${rows * 10}`,
+        `The ${number(size)} points laid out as a grid` + (answer === null ? "" : ", with the chosen ones marked"),
+        `<rect class="pic-frame" x="0" y="0" width="${columns * 10}" height="${rows * 10}"/>${cells}`,
+      );
+    },
+  };
+}
+
+const number = (value: number) => value.toLocaleString("en-US");
+const CAP_SOURCE = {
+  asOf: "27 November 2026",
+  source: "Romera-Paredes and others, Mathematical discoveries from program search with large language models (Nature, 2023)",
+  sourceUrl: "https://www.nature.com/articles/s41586-023-06924-6",
+};
+
+// Open problems come first. Their targets move as people publish: before adding or
+// keeping one, check its source, and retire a problem (keep its id and answers) once it is settled elsewhere.
+export const PROBLEMS: readonly Problem[] = [
+  noThreeInLine(75),
+  noThreeInLine(77),
+  noThreeInLine(79),
+  capSet(7, 236, CAP_SOURCE),
+  capSet(8, 512, CAP_SOURCE),
+  tour,
+  pack,
+  spaced,
+  cut,
+];
 export const findProblem = (id: string): Problem | undefined => PROBLEMS.find((problem) => problem.id === id);
 
 /** One number where higher always means a better answer, whichever way the problem scores. */

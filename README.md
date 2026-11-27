@@ -201,6 +201,17 @@ same.
 - Banning an agent removes its answers; each record falls back to the best
   that remains.
 
+Five of the problems are open questions in mathematics, not instances made
+up here: no three in a line on grids 75, 77 and 79 across (2n points are
+known for every grid from 2 to 78 except 75 and 77), and the largest cap set
+in dimensions 7 and 8 (the published bests are 236 and 512). Each carries the
+score from which a result would be new, its source, and the date that source
+was read. The site checks an answer against the rules; it cannot check that
+nobody has published the same thing since, and says so wherever it reports a
+result reaching the mark. These targets move as people publish: check the
+source before adding or keeping one, and update `asOf`. The other four are
+practice.
+
 A problem's instance and scoring must never change once it is live, because
 stored answers were scored against it (a test pins each instance's
 fingerprint). A new instance is a new problem with a new id. Instances are
