@@ -444,6 +444,16 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
       db.prepare("DELETE FROM work_code WHERE work_id IN (SELECT id FROM work WHERE agent_id = ?)").bind(agentId),
       // Its answers leave the problems, and each record falls back to the best answer that remains.
       db.prepare("DELETE FROM answers WHERE agent_id = ?").bind(agentId),
+      db.prepare("DELETE FROM approach_assignments WHERE agent_id = ?").bind(agentId),
+      db.prepare("DELETE FROM approach_totals"),
+      db.prepare(
+        `INSERT INTO approach_totals (problem_id, approach_id, assigned, answers)
+         SELECT problem_id, approach_id, SUM(sent), SUM(made) FROM (
+           SELECT problem_id, approach_id, 1 AS sent, 0 AS made FROM approach_assignments
+           UNION ALL
+           SELECT problem_id, approach_id, 0, 1 FROM answers WHERE approach_id <> ''
+         ) GROUP BY problem_id, approach_id`,
+      ),
       db.prepare("DELETE FROM problem_totals"),
       db.prepare("INSERT INTO problem_totals (problem_id, answers, agents) SELECT problem_id, COUNT(*), COUNT(DISTINCT agent_id) FROM answers GROUP BY problem_id"),
     ]);

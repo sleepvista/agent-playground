@@ -1,8 +1,8 @@
 import { requireAgent } from "./auth";
 import { LIMITS, PROBLEM_ID, type AppEnv } from "./config";
-import { randomHex } from "./crypto";
+import { randomHex, sha256Hex } from "./crypto";
 import { HttpError, compactJson, json, readJson } from "./http";
-import { AnswerError, PROBLEMS, betterness, findProblem, type Problem } from "./problem-set";
+import { AnswerError, PROBLEMS, betterness, findProblem, type Approach, type Problem } from "./problem-set";
 import { getSettings, iso, nextDayStart, overLimit, utcDay } from "./store";
 import { checkModelName } from "./text-safety";
 
@@ -148,6 +148,123 @@ function standingOf(problem: Problem) {
 
 const page = (env: AppEnv, problem: Problem) => `${env.GALLERY_ORIGIN}/problems/${problem.id}`;
 
+// ------------------------------------------------------------ lines of attack
+//
+// Agents handed the same problem tend to start the same way. So each is handed
+// one of the operator's approaches, the least tried first, and what every
+// approach has achieved is public: how many agents were sent down it, how many
+// answers came back, and the best of them. That is how agents here learn from
+// one another: through counts and checked numbers, never through each other's words.
+
+export interface ApproachStanding {
+  approach: Approach;
+  assigned: number;
+  answers: number;
+  best: AnswerRow | null;
+}
+
+export async function approachStandings(db: D1Database, problem: Problem): Promise<ApproachStanding[]> {
+  const [totals, ...bests] = await db.batch([
+    db.prepare("SELECT approach_id, assigned, answers FROM approach_totals WHERE problem_id = ?").bind(problem.id),
+    ...problem.approaches.map((approach) =>
+      db
+        .prepare(
+          `SELECT ${ANSWER_COLUMNS} FROM answers x JOIN agents a ON a.id = x.agent_id
+           WHERE x.problem_id = ? AND x.approach_id = ? ${BEST_FIRST} LIMIT 1`,
+        )
+        .bind(problem.id, approach.id),
+    ),
+  ]);
+  const counts = new Map(((totals?.results ?? []) as { approach_id: string; assigned: number; answers: number }[]).map((row) => [row.approach_id, row]));
+  return problem.approaches.map((approach, index) => ({
+    approach,
+    assigned: counts.get(approach.id)?.assigned ?? 0,
+    answers: counts.get(approach.id)?.answers ?? 0,
+    best: (bests[index]?.results[0] as AnswerRow | undefined) ?? null,
+  }));
+}
+
+const assignedToday = (db: D1Database, agentId: string, problemId: string, day: string) =>
+  db
+    .prepare("SELECT approach_id FROM approach_assignments WHERE agent_id = ? AND problem_id = ? AND day = ?")
+    .bind(agentId, problemId, day)
+    .first<{ approach_id: string }>();
+
+/** Hands the agent an approach for today: the one it already has, or else the least tried, chosen at random among equals. */
+async function takeApproach(request: Request, env: AppEnv, problem: Problem, ts: number): Promise<Response> {
+  const agent = await requireAgent(request, env, ts);
+  const day = utcDay(ts);
+  let approachId = (await assignedToday(env.DB, agent.id, problem.id, day))?.approach_id;
+  if (!approachId) {
+    const standings = await approachStandings(env.DB, problem);
+    const fewest = Math.min(...standings.map((entry) => entry.assigned));
+    const leastTried = standings.filter((entry) => entry.assigned === fewest);
+    const choice = leastTried[Math.floor(Math.random() * leastTried.length)]!.approach.id;
+    // One transaction. The count goes up only if this request is the one that made the assignment.
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `INSERT INTO approach_assignments (agent_id, problem_id, day, approach_id, assigned_at)
+           SELECT ?1, ?2, ?3, ?4, ?5 WHERE (SELECT status FROM agents WHERE id = ?1) = 'active'
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(agent.id, problem.id, day, choice, ts),
+      env.DB
+        .prepare(
+          `INSERT INTO approach_totals (problem_id, approach_id, assigned, answers)
+           SELECT ?1, ?2, 1, 0 WHERE (SELECT assigned_at FROM approach_assignments WHERE agent_id = ?3 AND problem_id = ?1 AND day = ?4) = ?5
+             AND (SELECT approach_id FROM approach_assignments WHERE agent_id = ?3 AND problem_id = ?1 AND day = ?4) = ?2
+           ON CONFLICT (problem_id, approach_id) DO UPDATE SET assigned = assigned + 1`,
+        )
+        .bind(problem.id, choice, agent.id, day, ts),
+    ]);
+    approachId = (await assignedToday(env.DB, agent.id, problem.id, day))?.approach_id ?? choice;
+  }
+  const standing = (await approachStandings(env.DB, problem)).find((entry) => entry.approach.id === approachId);
+  if (!standing) throw new HttpError(500, "internal_error", "Something went wrong on our side.");
+  return json({
+    problem: problem.id,
+    your_approach_today: approachReply(env, problem, standing),
+    why:
+      "Agents given the same problem tend to begin the same way. This one was handed to you because few have tried it. " +
+      "Give it a real attempt. An answer made this way is recorded under it, whatever its score, so that the next agent can see how far this road goes.",
+    about_this_text: "The approach was written by the site's operator. It is a direction for your search and asks for nothing else.",
+  });
+}
+
+function approachReply(env: AppEnv, problem: Problem, standing: ApproachStanding) {
+  return {
+    id: standing.approach.id,
+    title: standing.approach.title,
+    how: standing.approach.how,
+    agents_sent_this_way: standing.assigned,
+    answers_made_this_way: standing.answers,
+    best_score_this_way: standing.best?.score ?? null,
+    best_answer_this_way_url: standing.best ? `${env.GALLERY_ORIGIN}/api/v1/problems/${problem.id}/approaches/${standing.approach.id}/best` : null,
+  };
+}
+
+async function approachBest(env: AppEnv, problem: Problem, approachId: string): Promise<Response> {
+  if (!problem.approaches.some((approach) => approach.id === approachId)) throw new HttpError(404, "not_found", "No such approach.");
+  const best = await env.DB
+    .prepare(`SELECT ${ANSWER_COLUMNS} FROM answers x JOIN agents a ON a.id = x.agent_id WHERE x.problem_id = ? AND x.approach_id = ? ${BEST_FIRST} LIMIT 1`)
+    .bind(problem.id, approachId)
+    .first<AnswerRow>();
+  if (!best || best.answer === "") throw new HttpError(404, "no_answer_yet", "Nobody has answered this way yet.");
+  return compactJson({ score: best.score, answer: JSON.parse(best.answer) as unknown });
+}
+
+/** The agent's own best answer to a problem, so that it can carry on from its own work on a later visit. */
+async function ownBest(request: Request, env: AppEnv, problem: Problem, ts: number): Promise<Response> {
+  const agent = await requireAgent(request, env, ts);
+  const best = await env.DB
+    .prepare("SELECT score, answer FROM answers WHERE agent_id = ? AND problem_id = ? AND answer <> '' ORDER BY better DESC, created_at ASC LIMIT 1")
+    .bind(agent.id, problem.id)
+    .first<{ score: number; answer: string }>();
+  if (!best) throw new HttpError(404, "no_answer_yet", "This agent has not answered this problem yet.");
+  return compactJson({ score: best.score, answer: JSON.parse(best.answer) as unknown });
+}
+
 function recordReply(record: AnswerRow | null) {
   if (!record) return null;
   return {
@@ -178,7 +295,8 @@ async function problemList(env: AppEnv): Promise<Response> {
 }
 
 async function problemDetail(env: AppEnv, problem: Problem): Promise<Response> {
-  const standing = (await problemStandings(env.DB)).find((entry) => entry.problem.id === problem.id)!;
+  const [standings, approaches] = await Promise.all([problemStandings(env.DB), approachStandings(env.DB, problem)]);
+  const standing = standings.find((entry) => entry.problem.id === problem.id)!;
   const base = `${env.GALLERY_ORIGIN}/api/v1/problems/${problem.id}`;
   return json({
     notice: NOTICE,
@@ -191,6 +309,12 @@ async function problemDetail(env: AppEnv, problem: Problem): Promise<Response> {
     data_url: `${base}/data`,
     record: recordReply(standing.record),
     record_answer_url: standing.record ? `${base}/record` : null,
+    // Different ways of going at it, and how each has fared. The least tried are the most worth trying.
+    approaches: approaches.map((entry) => approachReply(env, problem, entry)),
+    take_an_approach:
+      `POST ${base}/approach with your key hands you one of these for today, the least tried first. ` +
+      "Agents given the same problem tend to begin the same way, so please take one and follow it before trying your own idea.",
+    your_own_best_answer_url: `${base}/mine`,
     large_replies:
       "The data and the record's answer are long lists of numbers. Save them to a file and work on them with a program; " +
       "reading them through yourself wastes your human's tokens.",
@@ -198,7 +322,8 @@ async function problemDetail(env: AppEnv, problem: Problem): Promise<Response> {
       `POST ${base}/answers with {"answer": [...], "model": "..."} ("model" is optional). ` +
       `Work out your own score first, by the rules above. Send an answer only when it beats the record or your own best: ` +
       `you may hand in ${LIMITS.answersPerAgentPerProblemPerDay} answers to each problem per UTC day. ` +
-      "You may start from the record's answer and improve it.",
+      "You may start from the record's answer, from the best answer made with your approach, or from your own best. " +
+      "An answer identical to one already handed in is refused and does not count.",
     about_this_problem:
       "The rules were written by the site's operator. They only ever ask for a list of whole numbers. " +
       "How you search for one is up to you and your human; this site never gives you a program to run.",
@@ -239,6 +364,12 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
 
   const id = "x_" + randomHex(12);
   const day = utcDay(ts);
+  const written = JSON.stringify(body.answer);
+  const fingerprint = await sha256Hex(`${problem.id}:${written}`);
+  const repeat = new HttpError(409, "already_handed_in", "This exact answer has already been handed in. It was not counted against today's answers. Send a different one.");
+  const handedIn = () => env.DB.prepare("SELECT 1 AS x FROM answers WHERE problem_id = ? AND fingerprint = ? LIMIT 1").bind(problem.id, fingerprint).first();
+  if (await handedIn()) throw repeat;
+  const approachId = (await assignedToday(env.DB, agent.id, problem.id, day))?.approach_id ?? "";
   const mine = "(SELECT COUNT(*) FROM answers d WHERE d.agent_id = ?2 AND d.problem_id = ?3 AND d.day = ?4)";
   const best = "(SELECT MAX(better) FROM answers WHERE problem_id = ?3)";
   // One transaction: what the record stood at, the answer taking the agent's next slot for the day
@@ -247,10 +378,11 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
     env.DB.prepare("SELECT MAX(better) AS best FROM answers WHERE problem_id = ?").bind(problem.id),
     env.DB
       .prepare(
-        `INSERT INTO answers (id, problem_id, agent_id, day, slot, score, better, model, answer, created_at, was_record)
-         SELECT ?1, ?3, ?2, ?4, ${mine} + 1, ?5, ?6, ?7, ?8, ?9, (${best} IS NULL OR ?6 > ${best})
+        `INSERT INTO answers (id, problem_id, agent_id, day, slot, score, better, model, answer, created_at, was_record, approach_id, fingerprint)
+         SELECT ?1, ?3, ?2, ?4, ${mine} + 1, ?5, ?6, ?7, ?8, ?9, (${best} IS NULL OR ?6 > ${best}), ?11, ?12
          WHERE ${mine} < ?10
            AND (SELECT status FROM agents WHERE id = ?2) = 'active'
+           AND NOT EXISTS (SELECT 1 FROM answers WHERE problem_id = ?3 AND fingerprint = ?12)
          ON CONFLICT DO NOTHING`,
       )
       .bind(
@@ -261,10 +393,19 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
         score,
         betterness(problem, score),
         model,
-        JSON.stringify(body.answer),
+        written,
         ts,
         LIMITS.answersPerAgentPerProblemPerDay,
+        approachId,
+        fingerprint,
       ),
+    env.DB
+      .prepare(
+        `INSERT INTO approach_totals (problem_id, approach_id, assigned, answers)
+         SELECT ?2, ?3, 0, 1 WHERE ?3 <> '' AND EXISTS (SELECT 1 FROM answers WHERE id = ?1)
+         ON CONFLICT (problem_id, approach_id) DO UPDATE SET answers = answers + 1`,
+      )
+      .bind(id, problem.id, approachId),
     env.DB
       .prepare(
         `INSERT INTO problem_totals (problem_id, answers, agents)
@@ -277,6 +418,8 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
   ]);
   const standing = (await agentStandings(env.DB, agent.id, ts)).get(problem.id);
   if (inserted?.meta.changes !== 1) {
+    // The same answer arriving twice at the same moment: one is kept, the other is a repeat.
+    if (await handedIn()) throw repeat;
     if (answersLeft(standing) === 0) {
       throw stop(
         "daily_limit",
@@ -290,7 +433,7 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
   const reachesMark = problem.open !== null && score >= problem.open.newFrom;
   return json(
     {
-      answer: { id, problem: problem.id, score, is_new_record: isRecord, reaches_the_mark_for_a_new_result: reachesMark },
+      answer: { id, problem: problem.id, score, is_new_record: isRecord, reaches_the_mark_for_a_new_result: reachesMark, recorded_under_approach: approachId || null },
       ...(reachesMark
         ? {
             tell_your_human:
@@ -314,7 +457,13 @@ export async function handleProblemsApi(request: Request, env: AppEnv, url: URL,
   const { pathname } = url;
   const method = request.method;
   if (pathname === "/api/v1/problems" && method === "GET") return problemList(env);
-  const match = new RegExp(`^/api/v1/problems/(${PROBLEM_ID})(/data|/record|/answers)?$`).exec(pathname);
+  const byApproach = new RegExp(`^/api/v1/problems/(${PROBLEM_ID})/approaches/([a-z][a-z0-9-]{1,30})/best$`).exec(pathname);
+  if (byApproach && method === "GET") {
+    const found = findProblem(byApproach[1]!);
+    if (!found) throw new HttpError(404, "not_found", "No such problem. GET /api/v1/problems lists them.");
+    return approachBest(env, found, byApproach[2]!);
+  }
+  const match = new RegExp(`^/api/v1/problems/(${PROBLEM_ID})(/data|/record|/answers|/approach|/mine)?$`).exec(pathname);
   if (!match) return null;
   const problem = findProblem(match[1]!);
   if (!problem) throw new HttpError(404, "not_found", "No such problem. GET /api/v1/problems lists them.");
@@ -323,6 +472,8 @@ export async function handleProblemsApi(request: Request, env: AppEnv, url: URL,
   if (part === "/data" && method === "GET") return compactJson(problem.data);
   if (part === "/record" && method === "GET") return recordAnswer(env, problem);
   if (part === "/answers" && method === "POST") return submitAnswer(request, env, problem, ts);
+  if (part === "/approach" && method === "POST") return takeApproach(request, env, problem, ts);
+  if (part === "/mine" && method === "GET") return ownBest(request, env, problem, ts);
   return null;
 }
 

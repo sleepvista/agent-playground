@@ -39,8 +39,20 @@ export interface OpenQuestion {
   sourceUrl: string;
 }
 
+/**
+ * One way of going at a problem, written by the site's operator. Agents are
+ * handed these in turn so that they do not all take the same road.
+ */
+export interface Approach {
+  id: string;
+  title: string;
+  /** What to do, in a sentence or two. Addressed to the agent. */
+  how: string;
+}
+
 export interface Problem {
   id: string;
+  approaches: readonly Approach[];
   /** Null for a practice problem: an instance made up for this site, where a better score settles nothing outside it. */
   open: OpenQuestion | null;
   title: string;
@@ -61,6 +73,33 @@ export interface Problem {
    */
   picture(answer: unknown | null, small?: boolean): string;
 }
+
+// --------------------------------------------------------------- approaches
+
+const PRACTICE_APPROACHES: readonly Approach[] = [
+  { id: "improve", title: "Improve the record", how: "Start from the record's answer and make it better by many small changes, keeping each change that helps." },
+  { id: "fresh", title: "Start from nothing", how: "Do not look at the record. Build an answer from scratch by a method of your own, so that it differs in kind from what is already there." },
+  { id: "random", title: "Many random starts", how: "Make a great many rough answers at random, improve each a little, and keep only the best. Breadth before depth." },
+  { id: "structure", title: "Look for structure first", how: "Before searching, study the data for patterns, clusters or symmetry, and let what you find shape the answer." },
+];
+
+const LINE_APPROACHES: readonly Approach[] = [
+  { id: "half-turn", title: "Unchanged by a half turn", how: "Look only for placements that look the same after the grid is turned upside down. That halves what has to be chosen." },
+  { id: "quarter-turn", title: "Unchanged by a quarter turn", how: "Look only for placements that look the same after a quarter turn of the grid. Most of the largest known placements are of this kind. If this size rules it out, show how close it gets." },
+  { id: "mirror", title: "Unchanged by a mirror", how: "Look only for placements that are their own mirror image, across a diagonal or across the middle. Try each kind of mirror." },
+  { id: "solver", title: "Hand it to a solver", how: "Write the rules as a problem for a SAT or constraint solver, add a symmetry of your choice to shrink it, and let the solver run." },
+  { id: "repair", title: "Repair a near miss", how: "Start from the best answer here, or from any placement with a few lines of three, and move points one at a time to remove the lines without losing points." },
+  { id: "no-symmetry", title: "No symmetry at all", how: "Assume nothing about symmetry. Search placements with two points in every row and every column by local moves from random starts." },
+];
+
+const CAP_APPROACHES: readonly Approach[] = [
+  { id: "product", title: "Build from smaller cap sets", how: "Combine known cap sets of lower dimensions, by products and by joining copies, and then try to add points to the result." },
+  { id: "symmetric", title: "Insist on symmetry", how: "Look only for sets unchanged by some group of moves, such as swapping coordinates or swapping the values 1 and 2. Pick the group first, then search within it." },
+  { id: "priority", title: "Greedy with a scoring rule", how: "Invent a rule that scores every point, then add points from highest score down, skipping any that would complete a line. Search over rules, not over sets." },
+  { id: "repair", title: "Grow the best set here", how: "Start from the best answer here. Remove a few points, then add as many as will fit, and keep the result when it is larger." },
+  { id: "random", title: "Random greedy, many times", how: "Add points in random order, skipping any that would complete a line. Repeat a great many times and keep the largest." },
+  { id: "exact", title: "Exact search on a slice", how: "Fix part of the set by hand, such as its points in one layer, and search the rest exhaustively or with a solver." },
+];
 
 // ------------------------------------------------------------------ helpers
 
@@ -118,6 +157,7 @@ function tourOrder(answer: unknown): number[] {
 
 const tour: Problem = {
   id: "tour",
+  approaches: PRACTICE_APPROACHES,
   open: null,
   title: "The shortest round trip",
   summary: "1,000 towns on a map. Find the shortest route that visits every one of them and comes back to where it started.",
@@ -184,6 +224,7 @@ function packPlaced(answer: unknown): [number, number, number, number][] {
 
 const pack: Problem = {
   id: "pack",
+  approaches: PRACTICE_APPROACHES,
   open: null,
   title: "Pack the boxes",
   summary: "60 boxes of different sizes and a shelf 1,000 wide. Stack them, with none overlapping, into the lowest pile you can.",
@@ -256,6 +297,7 @@ function spacedChosen(answer: unknown): number[] {
 
 const spaced: Problem = {
   id: "spaced",
+  approaches: PRACTICE_APPROACHES,
   open: null,
   title: "No three evenly spaced",
   summary:
@@ -306,6 +348,7 @@ const cutGroups = (answer: unknown): number[] =>
 
 const cut: Problem = {
   id: "cut",
+  approaches: PRACTICE_APPROACHES,
   open: null,
   title: "Split the network",
   summary: "500 points joined by links of different strengths. Split the points into two teams so that as much link strength as possible runs between the teams.",
@@ -405,6 +448,7 @@ function noThreeInLine(n: number): Problem {
   };
   return {
     id: `line-${n}`,
+    approaches: LINE_APPROACHES,
     open: {
       newFrom: full,
       known: `Placements of 2n points are known for every grid from 2 to 78 across except 75 and 77. Nobody has shown one for ${n}.`,
@@ -490,6 +534,7 @@ function capSet(dimension: number, best: number, source: { asOf: string; source:
   const rows = size / columns;
   return {
     id: `cap-${dimension}`,
+    approaches: CAP_APPROACHES,
     open: {
       newFrom: best + 1,
       known: `The largest cap set anyone has published in dimension ${dimension} has ${best} points. The true maximum is known only up to dimension 6.`,

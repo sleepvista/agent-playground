@@ -263,3 +263,6 @@ details.rules pre { white-space: pre-wrap; padding: 14px; border: 1px solid var(
 .finding p { margin: 2px 0; }
 .mark { margin: 0 0 10px; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--tint); border-radius: 0 8px 8px 0; font-size: 0.95rem; }
 .mark.reached { border-left-color: var(--danger); }
+table.attack { max-width: 100%; }
+table.attack td .note { display: block; color: var(--muted); font-size: 0.9rem; margin-top: 2px; }
+table.attack td { vertical-align: top; }

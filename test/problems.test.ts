@@ -323,9 +323,15 @@ describe("handing in answers", () => {
     const shown = await detail("tour");
     expect(shown.record).toMatchObject({ score: plainScore, answer: inOrder, untrusted: { found_by: pioneer.name, model: "test-model-1" } });
 
-    // The same answer from someone else ties the record and does not take it.
+    // The very same answer from someone else is refused outright, and costs them nothing.
     const copycat = await newAgent("copycat");
-    const tied = (await (await answer(copycat.key, "tour", { answer: shown.record!.answer })).json()) as Reply;
+    const copied = await answer(copycat.key, "tour", { answer: shown.record!.answer });
+    expect(copied.status).toBe(409);
+    expect(await code(copied)).toBe("already_handed_in");
+    type Mine = { problems: { id: string; answers_left_today: number }[] };
+    expect(((await (await call("/api/v1/me", { key: copycat.key })).json()) as Mine).problems.find((entry) => entry.id === "tour")?.answers_left_today).toBe(3);
+    // A different answer with the same score ties the record and does not take it.
+    const tied = (await (await answer(copycat.key, "tour", { answer: [...inOrder.slice(50), ...inOrder.slice(0, 50)] })).json()) as Reply;
     expect(tied).toMatchObject({ answer: { score: plainScore, is_new_record: false }, record_before: plainScore });
     expect((await detail("tour")).record!.untrusted.found_by).toBe(pioneer.name);
 
@@ -400,7 +406,7 @@ describe("handing in answers", () => {
 
   it("allows three answers a day to each problem, counted separately", async () => {
     const agent = await newAgent("steady");
-    for (let i = 0; i < 3; i++) expect((await answer(agent.key, "cut", { answer: Array.from({ length: POINTS }, (_, n) => (n + i) % 2) })).status).toBe(201);
+    for (let i = 0; i < 3; i++) expect((await answer(agent.key, "cut", { answer: Array.from({ length: POINTS }, (_, n) => (n < i * 7 ? 1 : n % 2)) })).status).toBe(201);
     const fourth = await answer(agent.key, "cut", { answer: Array(POINTS).fill(0) });
     expect(fourth.status).toBe(429);
     expect(Number(fourth.headers.get("Retry-After"))).toBeGreaterThan(0);
@@ -415,7 +421,7 @@ describe("handing in answers", () => {
       { id: "tour", your_best_score: null, answers_left_today: 3 },
       { id: "pack", your_best_score: pack.score(stacked()), answers_left_today: 2 },
       { id: "spaced", your_best_score: null, answers_left_today: 3 },
-      { id: "cut", your_best_score: cut.score(Array.from({ length: POINTS }, (_, n) => n % 2)), answers_left_today: 0 },
+      { id: "cut", your_best_score: Math.max(...[0, 1, 2].map((i) => cut.score(Array.from({ length: POINTS }, (_, n) => (n < i * 7 ? 1 : n % 2))))), answers_left_today: 0 },
     ]);
 
     // The limit is the database's own rule: each answer of the day takes a numbered slot.
@@ -430,10 +436,72 @@ describe("handing in answers", () => {
 
   it("cannot be raced past the daily limit", async () => {
     const agent = await newAgent("sprinter");
-    const results = await Promise.all(Array.from({ length: 7 }, () => answer(agent.key, "pack", { answer: stacked() })));
+    // Seven different answers at once: three are kept.
+    const shifted = (by: number) => stacked().map(([x, y, turned]) => [x, y! + by, turned]);
+    const results = await Promise.all(Array.from({ length: 7 }, (_, i) => answer(agent.key, "pack", { answer: shifted(i + 1) })));
     expect(results.filter((r) => r.status === 201)).toHaveLength(3);
+    // The same answer seven times at once: exactly one is kept, and the rest are repeats.
+    const twin = await newAgent("twin");
+    const same = await Promise.all(Array.from({ length: 7 }, () => answer(twin.key, "pack", { answer: shifted(50) })));
+    expect(same.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409, 409, 409]);
     const rows = await db.prepare("SELECT COUNT(*) AS n FROM answers WHERE agent_id = ?").bind(agent.id).first<{ n: number }>();
     expect(rows?.n).toBe(3);
+  });
+
+  it("hands each agent a different line of attack, and shows how far each has got", async () => {
+    type Way = { id: string; title: string; how: string; agents_sent_this_way: number; answers_made_this_way: number; best_score_this_way: number | null; best_answer_this_way_url: string | null };
+    const take = (key: string | undefined, id = "cap-7") => call(`/api/v1/problems/${id}/approach`, { key, method: "POST" });
+    const ways = async () => ((await (await call("/api/v1/problems/cap-7")).json()) as { approaches: Way[] }).approaches;
+    expect((await take(undefined)).status).toBe(401);
+    expect((await take((await newAgent("lost")).key, "nowhere")).status).toBe(404);
+    expect((await ways()).map((way) => way.agents_sent_this_way)).toEqual([0, 0, 0, 0, 0, 0]);
+
+    // Six agents are sent six different ways: the least tried is always handed out next.
+    const sent: Record<string, { key: string; id: string }> = {};
+    for (let i = 0; i < 6; i++) {
+      const agent = await newAgent("explorer");
+      const reply = (await (await take(agent.key)).json()) as { your_approach_today: Way };
+      sent[reply.your_approach_today.id] = agent;
+      // Asking again the same day gives the same one, and is not counted twice.
+      expect(((await (await take(agent.key)).json()) as { your_approach_today: Way }).your_approach_today.id).toBe(reply.your_approach_today.id);
+    }
+    expect(Object.keys(sent).sort()).toEqual(["exact", "priority", "product", "random", "repair", "symmetric"]);
+    expect((await ways()).map((way) => way.agents_sent_this_way)).toEqual([1, 1, 1, 1, 1, 1]);
+    // The seventh starts the second round.
+    await take((await newAgent("explorer")).key);
+    expect((await ways()).map((way) => way.agents_sent_this_way).sort()).toEqual([1, 1, 1, 1, 1, 2]);
+
+    // An answer is recorded under the approach its agent was handed, and its best is there for the next agent to start from.
+    const product = sent.product!;
+    const made = (await (await answer(product.key, "cap-7", { answer: [0, 1, 3, 4] })).json()) as { answer: { score: number; recorded_under_approach: string | null } };
+    expect(made.answer).toMatchObject({ score: 4, recorded_under_approach: "product" });
+    await answer(sent.random!.key, "cap-7", { answer: [0, 1] });
+    const after = await ways();
+    expect(after.find((way) => way.id === "product")).toMatchObject({ answers_made_this_way: 1, best_score_this_way: 4 });
+    expect(after.find((way) => way.id === "random")).toMatchObject({ answers_made_this_way: 1, best_score_this_way: 2 });
+    expect(after.find((way) => way.id === "exact")).toMatchObject({ answers_made_this_way: 0, best_score_this_way: null, best_answer_this_way_url: null });
+    const best = await call("/api/v1/problems/cap-7/approaches/random/best");
+    expect(await best.json()).toEqual({ score: 2, answer: [0, 1] });
+    expect((await call("/api/v1/problems/cap-7/approaches/exact/best")).status).toBe(404);
+    expect((await call("/api/v1/problems/cap-7/approaches/nowhere/best")).status).toBe(404);
+
+    // An agent that took no approach is still free to answer; its answer is simply not filed under one.
+    const loner = await newAgent("loner");
+    const alone = (await (await answer(loner.key, "cap-7", { answer: [0, 1, 3] })).json()) as { answer: { recorded_under_approach: string | null } };
+    expect(alone.answer.recorded_under_approach).toBeNull();
+
+    // An agent can fetch its own best answer, and only its own.
+    expect(await (await call("/api/v1/problems/cap-7/mine", { key: product.key })).json()).toEqual({ score: 4, answer: [0, 1, 3, 4] });
+    expect(await (await call("/api/v1/problems/cap-7/mine", { key: loner.key })).json()).toEqual({ score: 3, answer: [0, 1, 3] });
+    expect((await call("/api/v1/problems/cap-7/mine")).status).toBe(401);
+    expect((await call("/api/v1/problems/cap-7/mine", { key: sent.exact!.key })).status).toBe(404);
+
+    const page = await (await call("/problems/cap-7")).text();
+    expect(page).toContain("Lines of attack");
+    expect(page).toContain("Build from smaller cap sets");
+    // Banning an agent takes its assignment and its answers out of the counts.
+    expect((await admin(`/api/admin/agents/${product.id}`, { action: "ban" })).status).toBe(200);
+    expect((await ways()).find((way) => way.id === "product")).toMatchObject({ agents_sent_this_way: 0, answers_made_this_way: 0, best_score_this_way: null });
   });
 
   it("stops an agent that keeps sending broken answers", async () => {
