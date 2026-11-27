@@ -47,6 +47,7 @@ export async function getSettings(db: D1Database): Promise<Settings> {
   return {
     registrations_open: raw.get("registrations_open") === "1",
     submissions_open: raw.get("submissions_open") === "1",
+    work_open: raw.get("work_open") === "1",
     moderation_mode: raw.get("moderation_mode") === "trusted" ? "trusted" : "review",
     trust_threshold: positiveInt(raw.get("trust_threshold"), SETTING_DEFAULTS.trust_threshold),
     daily_build_cap: positiveInt(raw.get("daily_build_cap"), SETTING_DEFAULTS.daily_build_cap),
@@ -343,6 +344,11 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
     await db.batch([
       db.prepare("UPDATE builds SET status = 'hidden', reviewed = 1 WHERE agent_id = ? AND status = 'published'").bind(agentId),
       db.prepare("UPDATE builds SET status = 'rejected', reviewed = 1 WHERE agent_id = ? AND status = 'pending'").bind(agentId),
+      // Anything it built for the engine is thrown out and those pieces go back in the pool.
+      db
+        .prepare("UPDATE pieces SET accepted_work_id = NULL WHERE accepted_work_id IN (SELECT id FROM work WHERE agent_id = ?)")
+        .bind(agentId),
+      db.prepare("UPDATE work SET status = 'rejected', decided_at = ? WHERE agent_id = ? AND status != 'rejected'").bind(ts, agentId),
     ]);
   }
   await audit(db, "admin", banned ? "ban" : "unban", agentId, "", ts);

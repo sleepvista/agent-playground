@@ -1,8 +1,9 @@
-import { BUILD_ID, type AppEnv } from "./config";
+import { BUILD_ID, WORK_ID, type AppEnv } from "./config";
 import { verifyPreview } from "./crypto";
 import { withHeaders } from "./http";
 import { staticFile } from "./static";
 import { getBuildCode, nowSeconds } from "./store";
+import { finishedEngine, workForChecking } from "./work";
 
 /**
  * The sandbox host shows one build inside a frame, and nothing else. It has
@@ -86,14 +87,15 @@ function sandboxHeaders(env: AppEnv): Record<string, string> {
  * that could end the data block or start markup is written as an escape, so
  * no code a build contains can become part of the page itself.
  */
-function embedAsJson(code: string): string {
-  return JSON.stringify(code).replace(
+function embedAsJson(data: unknown): string {
+  return JSON.stringify(data).replace(
     /[<>&\u{2028}\u{2029}]/gu,
     (char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"),
   );
 }
 
-function hostPage(code: string): string {
+/** A sketch: a build on its own, or the showcase running on the finished engine's pieces. */
+function hostPage(data: unknown): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -105,14 +107,34 @@ function hostPage(code: string): string {
 <body>
 <canvas id="stage" tabindex="0" aria-label="Drawing made by an AI agent's program"></canvas>
 <p id="notice" role="status" hidden></p>
-<script id="build-code" type="application/json">${embedAsJson(code)}</script>
+<script id="build-code" type="application/json">${embedAsJson(data)}</script>
 <script src="/runtime.js"></script>
+</body>
+</html>`;
+}
+
+/** The page that runs the automatic checks on one submitted piece and shows the result. */
+function checksPage(data: unknown): string {
+  return `<!doctype html>
+<html lang="en" class="checks">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checks</title>
+<link rel="stylesheet" href="/runtime.css">
+</head>
+<body>
+<p id="summary" role="status">Running checks...</p>
+<ol id="results"></ol>
+<script id="check-data" type="application/json">${embedAsJson(data)}</script>
+<script src="/piece-runner.js"></script>
 </body>
 </html>`;
 }
 
 const RUNTIME_FILES: Record<string, string> = {
   "/runtime.js": "/sandbox-runtime/runtime.js",
+  "/piece-runner.js": "/sandbox-runtime/piece-runner.js",
   "/runtime.css": "/sandbox-runtime/runtime.css",
 };
 
@@ -129,6 +151,27 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
     return response ? withHeaders(response, { ...headers, "Cache-Control": "public, max-age=300" }) : plain(404, "Not found");
   }
 
+  const page = (body: string) =>
+    new Response(request.method === "HEAD" ? null : body, { headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
+  const framed = request.headers.get("Sec-Fetch-Dest") === "iframe";
+
+  // The checks for one submitted piece. Carries the hidden checks, so it is
+  // only served with a signed, short-lived link from the admin console.
+  const checks = new RegExp(`^/t/(${WORK_ID})$`).exec(url.pathname);
+  if (checks) {
+    const workId = checks[1]!;
+    if (!framed || !(await verifyPreview(env, workId, url.searchParams.get("p") ?? "", nowSeconds()))) return plain(404, "Not found");
+    const work = await workForChecking(env.DB, workId);
+    return work ? page(checksPage({ ...work, reportTo: env.GALLERY_ORIGIN })) : plain(404, "Not found");
+  }
+
+  // The showcase, running on the engine. Exists only once every piece is built.
+  if (url.pathname === "/e") {
+    if (!framed) return new Response(null, { status: 302, headers: { ...headers, Location: `${env.GALLERY_ORIGIN}/engine` } });
+    const engine = await finishedEngine(env.DB);
+    return engine ? page(hostPage({ code: engine.showcase, pieces: engine.pieces })) : plain(404, "Not found");
+  }
+
   const match = new RegExp(`^/b/(${BUILD_ID})$`).exec(url.pathname);
   if (!match) return plain(404, "Not found");
   const id = match[1]!;
@@ -136,7 +179,7 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
   // A build is only ever shown inside the gallery's frame, next to its label
   // and report button. Browsers set Sec-Fetch-Dest themselves; a web page
   // cannot forge it.
-  if (request.headers.get("Sec-Fetch-Dest") !== "iframe") {
+  if (!framed) {
     return new Response(null, {
       status: 302,
       headers: { ...headers, Location: `${env.GALLERY_ORIGIN}/build/${id}` },
@@ -149,7 +192,5 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
     const token = url.searchParams.get("p") ?? "";
     if (!(await verifyPreview(env, id, token, nowSeconds()))) return plain(404, "Not found");
   }
-  return new Response(request.method === "HEAD" ? null : hostPage(build.code), {
-    headers: { ...headers, "Content-Type": "text/html; charset=utf-8" },
-  });
+  return page(hostPage(build.code));
 }

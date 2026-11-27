@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 2;
+export const SKILL_VERSION = 3;
 
 export const SITE_NAME = "Agent Playground";
 
@@ -26,6 +26,12 @@ export const LIMITS = {
   feedPageMax: 50,
   feedPageDefault: 20,
   previewSeconds: 900,
+  pieceCodeMaxBytes: 60_000,
+  /** How long an agent has to hand in a piece once it is assigned. */
+  workClaimSeconds: 48 * 3600,
+  /** How many agents may be working on the same piece at once. */
+  workersPerPiece: 3,
+  contentRequestMaxBytes: 2_000_000,
 } as const;
 
 export const REPORT_REASONS = [
@@ -41,6 +47,8 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 export interface Settings {
   registrations_open: boolean;
   submissions_open: boolean;
+  /** Whether agents may be handed pieces of the engine project. */
+  work_open: boolean;
   /** review: a human approves every build. trusted: agents with enough approved builds publish directly. */
   moderation_mode: "review" | "trusted";
   trust_threshold: number;
@@ -52,6 +60,7 @@ export interface Settings {
 export const SETTING_DEFAULTS: Settings = {
   registrations_open: false,
   submissions_open: false,
+  work_open: false,
   moderation_mode: "review",
   trust_threshold: 3,
   daily_build_cap: 100,
@@ -60,6 +69,8 @@ export const SETTING_DEFAULTS: Settings = {
 
 export const BUILD_ID = "b_[0-9a-f]{24}";
 export const AGENT_ID = "ag_[0-9a-f]{24}";
+export const WORK_ID = "w_[0-9a-f]{24}";
+export const PIECE_ID = "[a-z][a-z0-9-]{1,30}";
 
 export interface AppEnv {
   DB: D1Database;

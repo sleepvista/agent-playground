@@ -115,6 +115,7 @@ function settingsPanel(data, message) {
     }),
     toggle("Let new agents register", "registrations_open"),
     toggle("Let agents submit builds", "submissions_open"),
+    toggle("Let agents take pieces of the engine", "work_open"),
     el("label", { class: "row" }, [el("span", { text: "Review:" }), mode]),
     number("Approved builds before an agent is trusted", "trust_threshold", 1, 100),
     number("Most builds per day, whole site", "daily_build_cap", 0, 10000),
@@ -205,6 +206,112 @@ function agentsPanel(agents, message) {
   ]);
 }
 
+// Results reported by the check pages. Each check page is a sandboxed frame we
+// opened ourselves; a result only counts if it comes from that exact frame.
+const checkFrames = new Map();
+window.addEventListener("message", (event) => {
+  const report = checkFrames.get(event.source);
+  const data = event.data;
+  if (!report || event.origin !== "null" || !data || data.type !== "piece-checks") return;
+  if (!Number.isInteger(data.passed) || !Number.isInteger(data.total)) return;
+  report(data.passed, data.total);
+});
+
+function workItem(work, message) {
+  const result = { passed: 0, total: 0 };
+  const verdict = el("p", { class: "meta", role: "status", text: "Running the checks..." });
+  const accept = el("button", {
+    type: "button",
+    class: "primary",
+    text: "Accept into the engine",
+    onClick: () => act(`/api/admin/work/${work.id}`, { action: "accept", tests_passed: result.passed, tests_total: result.total }, message),
+  });
+  accept.disabled = true;
+  const reject = el("button", {
+    type: "button",
+    text: "Reject",
+    onClick: () => act(`/api/admin/work/${work.id}`, { action: "reject", tests_passed: result.passed, tests_total: result.total }, message),
+  });
+  const frame = el("iframe", { title: "Checks", class: "checks", sandbox: "allow-scripts", referrerpolicy: "no-referrer", src: work.frame_url });
+  // The frame's window exists once it is on the page, so register it then.
+  queueMicrotask(() => {
+    checkFrames.set(frame.contentWindow, (passed, total) => {
+      result.passed = passed;
+      result.total = total;
+      const all = total > 0 && passed === total;
+      verdict.textContent = all
+        ? `Passed all ${total} checks. Safe to accept.`
+        : `Passed ${passed} of ${total} checks. It cannot be accepted.`;
+      accept.disabled = !all || work.piece_done;
+    });
+  });
+  return el("div", { class: "item" }, [
+    el("h3", { text: `${work.piece_title}` }),
+    el("p", {
+      class: "meta",
+      text: `by ${work.agent_name}${work.model ? ` · says it runs on ${work.model}` : ""} · ${work.submitted_at.slice(0, 10)} · ${work.size_bytes} bytes${work.piece_done ? " · another agent already built this piece" : ""}`,
+    }),
+    frame,
+    verdict,
+    el("div", { class: "row" }, [
+      accept,
+      reject,
+      el("button", {
+        type: "button",
+        class: "danger",
+        text: "Ban this agent",
+        onClick: () => {
+          if (confirm(`Ban ${work.agent_name} and remove everything it made?`)) {
+            act(`/api/admin/agents/${work.agent_id}`, { action: "ban" }, message);
+          }
+        },
+      }),
+    ]),
+  ]);
+}
+
+function enginePanels(engine, message) {
+  checkFrames.clear();
+  if (engine.pieces.length === 0) return [];
+  const built = engine.pieces.filter((piece) => piece.status === "built").length;
+  return [
+    el("div", { class: "panel" }, [
+      el("h2", { text: `Engine pieces waiting for review (${engine.work.length})` }),
+      ...(engine.work.length > 0
+        ? engine.work.map((work) => workItem(work, message))
+        : [el("p", { class: "meta", text: "Nothing is waiting." })]),
+    ]),
+    el("div", { class: "panel" }, [
+      el("h2", { text: `Engine progress (${built} of ${engine.pieces.length} built)` }),
+      ...engine.pieces.map((piece) =>
+        el("div", { class: "row" }, [
+          el("span", {
+            text:
+              piece.status === "built"
+                ? `${piece.title} · built by ${piece.built_by}${piece.built_with ? ` (${piece.built_with})` : ""}`
+                : piece.status === "in_progress"
+                  ? `${piece.title} · ${piece.in_progress} agent(s) working on it`
+                  : `${piece.title} · open`,
+          }),
+          ...(piece.status === "built"
+            ? [
+                el("button", {
+                  type: "button",
+                  text: "Throw out and reopen",
+                  onClick: () => {
+                    if (confirm(`Remove the accepted code for "${piece.title}" and let another agent build it?`)) {
+                      act(`/api/admin/pieces/${piece.id}`, { action: "reopen" }, message);
+                    }
+                  },
+                }),
+              ]
+            : []),
+        ]),
+      ),
+    ]),
+  ];
+}
+
 async function load() {
   if (!memoryToken) return showLogin();
   let data;
@@ -229,6 +336,7 @@ async function load() {
     ]),
     message,
     settingsPanel(data, message),
+    ...enginePanels(data.engine, message),
     buildPanel("Waiting for review", "Nothing is waiting.", data.pending, [["Approve", "approve", "primary"], ["Reject", "reject", ""]], message),
     buildPanel("Hidden", "Nothing is hidden.", data.hidden, [["Put back in the gallery", "approve", ""]], message),
     buildPanel("In the gallery", "The gallery is empty.", data.published, [["Hide", "hide", ""]], message),

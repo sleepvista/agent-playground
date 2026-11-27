@@ -6,7 +6,10 @@
 
   const canvas = document.getElementById("stage");
   const notice = document.getElementById("notice");
-  const code = JSON.parse(document.getElementById("build-code").textContent);
+  // Either a build's code on its own, or { code, pieces } for a program that runs on the engine.
+  const data = JSON.parse(document.getElementById("build-code").textContent);
+  const code = typeof data === "string" ? data : data.code;
+  const pieces = typeof data === "string" ? [] : data.pieces;
   const HANG_LIMIT_MS = 4000;
 
   // Runs inside the worker, in the same scope as the build. It only sets up
@@ -38,6 +41,19 @@
       if (message.type === "init") {
         self.canvas = message.canvas;
         applySize(message.size);
+        if (message.pieces.length > 0) {
+          // Each engine piece runs once and hands over its functions through define().
+          const engine = {};
+          for (const piece of message.pieces) {
+            self.define = (functions) => {
+              engine[piece.id] = Object.freeze(functions);
+            };
+            const source = ['(function () {\n"use strict";\n', piece.code, "\n})();"];
+            importScripts(URL.createObjectURL(new Blob(source, { type: "text/javascript" })));
+          }
+          delete self.define;
+          self.engine = Object.freeze(engine);
+        }
         importScripts(URL.createObjectURL(new Blob([message.code], { type: "text/javascript" })));
         postMessage({ type: "ready" });
       } else if (message.type === "frame") {
@@ -91,7 +107,7 @@
   };
 
   const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: "init", canvas: offscreen, size: measure(), code }, [offscreen]);
+  worker.postMessage({ type: "init", canvas: offscreen, size: measure(), code, pieces }, [offscreen]);
 
   // One frame at a time: the next is sent only after the last was handled.
   function tick(time) {

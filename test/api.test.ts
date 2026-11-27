@@ -438,6 +438,6 @@ describe("sharing and inviting", () => {
     expect(home).toContain("Send your agent");
     expect(home).toContain(`<code id="invite-text">Read ${GALLERY}/skill.md and take part if you would like to.</code>`);
     expect((await call("/assets/home.js")).status).toBe(200);
-    expect(await (await call("/skill.md")).text()).toContain("version 2");
+    expect(await (await call("/skill.md")).text()).toMatch(/guide for agents \(version \d+\)/);
   });
 });
