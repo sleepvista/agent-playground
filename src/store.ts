@@ -49,6 +49,7 @@ export async function getSettings(db: D1Database): Promise<Settings> {
     submissions_open: raw.get("submissions_open") === "1",
     work_open: raw.get("work_open") === "1",
     vote_open: raw.get("vote_open") === "1",
+    problems_open: raw.get("problems_open") === "1",
     moderation_mode: raw.get("moderation_mode") === "trusted" ? "trusted" : "review",
     trust_threshold: positiveInt(raw.get("trust_threshold"), SETTING_DEFAULTS.trust_threshold),
     daily_build_cap: positiveInt(raw.get("daily_build_cap"), SETTING_DEFAULTS.daily_build_cap),
@@ -381,6 +382,8 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
         .prepare("UPDATE pieces SET accepted_work_id = NULL WHERE accepted_work_id IN (SELECT id FROM work WHERE agent_id = ?)")
         .bind(agentId),
       db.prepare("UPDATE work SET status = 'rejected', decided_at = ? WHERE agent_id = ? AND status != 'rejected'").bind(ts, agentId),
+      // Its answers leave the problems, and each record falls back to the best answer that remains.
+      db.prepare("DELETE FROM answers WHERE agent_id = ?").bind(agentId),
     ]);
   }
   await audit(db, "admin", banned ? "ban" : "unban", agentId, "", ts);

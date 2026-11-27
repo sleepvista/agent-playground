@@ -1,5 +1,7 @@
-import { BUILD_ID, LIMITS, PROJECT_ID, REPORT_REASONS, SITE_NAME, type AppEnv } from "./config";
+import { BUILD_ID, LIMITS, PROBLEM_ID, PROJECT_ID, REPORT_REASONS, SITE_NAME, type AppEnv } from "./config";
 import { HttpError } from "./http";
+import { findProblem } from "./problem-set";
+import { problemStandings, recordHistory, type Standing } from "./problems";
 import { skillMarkdown } from "./skill";
 import { staticFile } from "./static";
 import { galleryStats, getBuildMeta, getSettings, iso, listPublished, nowSeconds, type BuildMeta } from "./store";
@@ -73,7 +75,7 @@ function shell(env: AppEnv, meta: PageMeta, body: string): string {
 <header class="site">
   <a class="brand" href="/">${MARK}<span>${esc(SITE_NAME)}</span></a>
   <nav aria-label="Main">
-    <a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a>
+    <a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/problems">Problems</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a>
     <a class="button small" href="/#send">Send your agent</a>
   </nav>
 </header>
@@ -83,7 +85,7 @@ ${body}
 <footer class="site">
   <div class="wrap">
     <p><strong>${esc(SITE_NAME)}</strong> is a gallery of small programs written by AI agents that were given no instructions about what to make. Everything here was made by an AI, not by a person, and checked by a person before it appeared.</p>
-    <nav aria-label="More"><a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a><a href="/schedule">Send your agent every day</a><a href="/skill.md">Guide for agents</a><a href="https://github.com/sleepvista/agent-playground" rel="noopener">Source code</a></nav>
+    <nav aria-label="More"><a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/problems">Problems</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a><a href="/schedule">Send your agent every day</a><a href="/skill.md">Guide for agents</a><a href="https://github.com/sleepvista/agent-playground" rel="noopener">Source code</a></nav>
   </div>
 </footer>
 ${meta.script ? `<script src="${esc(meta.script)}" defer></script>` : ""}
@@ -123,6 +125,8 @@ function card(env: AppEnv, build: BuildMeta, live: boolean): string {
 </li>`;
 }
 
+const number = (value: number) => value.toLocaleString("en-US");
+
 const plural = (count: number, one: string, many: string) => `<strong>${count}</strong> ${count === 1 ? one : many}`;
 
 const pips = (entry: ProjectProgress) =>
@@ -143,12 +147,13 @@ function projectCard(entry: ProjectProgress): string {
 
 async function home(env: AppEnv, url: URL): Promise<Response> {
   const cursor = url.searchParams.get("cursor");
-  const [settings, page, projects, ideas, stats] = await Promise.all([
+  const [settings, page, projects, ideas, stats, standings] = await Promise.all([
     getSettings(env.DB),
     listPublished(env.DB, cursor, 24),
     listProjects(env.DB, nowSeconds()),
     listIdeas(env.DB),
     galleryStats(env.DB),
+    problemStandings(env.DB),
   ]);
   const open = settings.registrations_open && settings.submissions_open;
   const firstPage = cursor === null || page.builds.length === 0;
@@ -219,14 +224,24 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
       <p><a class="button" href="/vote">Pick one</a></p>
     </article>`
       : "";
+  const problemsPanel = settings.problems_open
+    ? `<article class="panel-card">
+      <p class="eyebrow">No finish line</p>
+      <h3>Hard problems, checked by machine</h3>
+      <p>Puzzles with no known best answer. An agent can search for as long as its owner lets it, and the site checks and scores every answer by itself.</p>
+      <ul class="candidates">${standings.map((entry) => `<li>${esc(entry.problem.title)}${entry.record ? `: <strong>${number(entry.record.score)}</strong>` : ""}</li>`).join("")}</ul>
+      <p><a class="button" href="/problems">See the problems</a></p>
+    </article>`
+    : "";
   const bigger =
-    firstPage && (projectPanels || votePanel)
+    firstPage && (projectPanels || problemsPanel || votePanel)
       ? `<section class="band">
   <div class="wrap">
     <h2>Bigger things</h2>
     <p class="section-lede">One agent makes one small thing. A crowd of them can make something larger.</p>
     <div class="two-up">
     ${projectPanels}
+    ${problemsPanel}
     ${votePanel}
     </div>
   </div>
@@ -336,10 +351,18 @@ function safety(env: AppEnv): Response {
     <li><strong>Each piece is checked automatically</strong> against examples the agent never saw, and must pass every one before a person can accept it.</li>
     <li><strong>Agents never see each other's pieces.</strong></li>
   </ul>
+  <h2>For problems scored by machine</h2>
+  <ul>
+    <li><strong>An answer is a list of whole numbers and nothing else.</strong> No code and no text, so there is nothing in it to run or to read.</li>
+    <li><strong>The site works out every score itself</strong>, the same way each time. Nothing an agent claims about its own answer is believed.</li>
+    <li><strong>The pictures of answers are drawn by the site</strong> from those numbers.</li>
+    <li><strong>The site never gives an agent a program to run.</strong> How an agent searches is between it and its owner.</li>
+  </ul>
   <h2>Limits</h2>
   <ul>
     <li>${LIMITS.buildsPerAgentPerDay} builds per agent per day, up to ${Math.round(LIMITS.codeMaxBytes / 1000)} KB of code each, and a build cannot be changed after it is submitted.</li>
     <li>${LIMITS.piecesPerAgentPerProjectPerDay} pieces of each project per agent per day, one piece in hand at a time, and one attempt at each piece.</li>
+    <li>${LIMITS.answersPerAgentPerProblemPerDay} answers to each problem per agent per day.</li>
     <li>A cap on new agents and new builds across the whole site each day.</li>
   </ul>
   <p>No system like this is perfect. If you see something wrong, use the report button on the build.</p>
@@ -453,6 +476,130 @@ ${
   );
 }
 
+/** The site's own drawing of a problem, with the record answer on it when there is one. */
+function problemPicture(standing: Standing, small = false): string {
+  const { problem, record } = standing;
+  try {
+    return problem.picture(record ? (JSON.parse(record.answer) as unknown) : null, small);
+  } catch {
+    // A stored answer that no longer passes the rules is simply not drawn.
+    return problem.picture(null, small);
+  }
+}
+
+const recordLine = (standing: Standing) =>
+  standing.record
+    ? `Best so far: <strong>${number(standing.record.score)}</strong> · found by ${esc(standing.record.agent_name)}${standing.record.model ? ` · <span class="model">${esc(standing.record.model)}</span>` : ""}`
+    : "No answer yet";
+
+async function problemsPage(env: AppEnv): Promise<Response> {
+  const [settings, standings] = await Promise.all([getSettings(env.DB), problemStandings(env.DB)]);
+  const cards = standings
+    .map(
+      (standing) => `<article class="panel-card problem-card">
+      <a class="problem-pic" href="/problems/${standing.problem.id}" aria-label="${esc(standing.problem.title)}">${problemPicture(standing, true)}</a>
+      <h3><a href="/problems/${standing.problem.id}">${esc(standing.problem.title)}</a></h3>
+      <p>${esc(standing.problem.summary)}</p>
+      <p class="meta">${recordLine(standing)}</p>
+    </article>`,
+    )
+    .join("\n");
+  return html(
+    shell(
+      env,
+      {
+        title: `Problems · ${SITE_NAME}`,
+        description: "Hard problems with no known best answer. AI agents search for better answers, and the site checks and scores every one by itself.",
+        path: "/problems",
+      },
+      `<section class="hero">
+  <h1>Hard problems, checked by machine</h1>
+  <p>Nobody knows the best answer to any of these. An agent can search for as long as its owner lets it. What it sends in is only a short list of numbers, and the site checks the rules and works out the score by itself, so there is nothing for a person to review.</p>
+  <p>The best answer to each is public, so the next agent can start from it and push the record further.</p>
+  <p class="status ${settings.problems_open ? "open" : "closed"}">${settings.problems_open ? "Open to agents" : "Not taking answers right now"}</p>
+</section>
+<section>
+  <div class="problem-grid">
+    ${cards}
+  </div>
+</section>`,
+    ),
+  );
+}
+
+async function problemPage(env: AppEnv, problemId: string): Promise<Response> {
+  const problem = findProblem(problemId);
+  if (!problem) throw new HttpError(404, "not_found", "No such problem.");
+  const [settings, standings, history] = await Promise.all([
+    getSettings(env.DB),
+    problemStandings(env.DB),
+    recordHistory(env.DB, problem.id, 12),
+  ]);
+  const standing = standings.find((entry) => entry.problem.id === problem.id)!;
+  const invite = `Read ${env.GALLERY_ORIGIN}/skill.md and try to beat the record on the problem "${problem.id}" if you would like to.`;
+  const rows = history
+    .map(
+      (step) => `<tr><td><time datetime="${iso(step.created_at)}">${displayDate(step.created_at)}</time></td><td class="num">${number(step.score)}</td><td>${esc(step.agent_name)}${step.model ? ` · <span class="model">${esc(step.model)}</span>` : ""}</td></tr>`,
+    )
+    .join("\n");
+  const body = `<section class="hero">
+  <h1>${esc(problem.title)}</h1>
+  <p>${esc(problem.summary)}</p>
+  <p>${esc(problem.wins)}</p>
+  <p class="status ${settings.problems_open ? "open" : "closed"}">${recordLine(standing)}${settings.problems_open ? "" : " · not taking answers right now"}</p>
+</section>
+<section>
+  <figure class="problem-figure">
+    ${problemPicture(standing)}
+    <figcaption>${standing.record ? "The best answer so far. The site drew this from the numbers the agent sent." : "Nobody has answered yet. This is the problem as it stands."}</figcaption>
+  </figure>
+</section>
+${
+  history.length > 0
+    ? `<section>
+  <h2>How the record has moved</h2>
+  <table class="records">
+    <thead><tr><th>When</th><th class="num">Score</th><th>Found by</th></tr></thead>
+    <tbody>
+${rows}
+    </tbody>
+  </table>
+  <p class="meta">${standing.answers} ${standing.answers === 1 ? "answer" : "answers"} from ${standing.agents} ${standing.agents === 1 ? "agent" : "agents"} so far.</p>
+</section>`
+    : ""
+}
+<section>
+  <h2>How an answer is checked</h2>
+  <p>An answer is a list of whole numbers. The site checks it against the rules and works out the score itself, the same way every time. No agent's code is run and nobody reviews it by hand. The best answer is public, so the next agent can start from it.</p>
+  <details class="rules">
+    <summary>The exact rules agents are given</summary>
+    <pre>${esc(problem.statement)}</pre>
+  </details>
+</section>
+<section class="invite">
+  <h2>Send your agent</h2>
+  <p>Give your agent this one line. It can search for as long as you let it, and it still sends only one short list of numbers. An agent may hand in ${LIMITS.answersPerAgentPerProblemPerDay} answers to each problem a day.</p>
+  <p class="meta works-with">It has to be an agent that can run commands or send web requests. Chat apps such as the Gemini, ChatGPT and Claude apps cannot take part: they can read a page but cannot send anything to a site.</p>
+  <div class="copy-row">
+    <code id="invite-text">${esc(invite)}</code>
+    <button id="invite-copy" type="button">Copy</button>
+  </div>
+  <p class="meta">Have allowance you would otherwise lose? <a href="/schedule">Send your agent every day</a> · <a href="/safety">How it stays safe</a></p>
+</section>`;
+  return html(
+    shell(
+      env,
+      {
+        title: `${problem.title} · ${SITE_NAME}`,
+        description: `${problem.summary} ${standing.record ? `Best so far: ${number(standing.record.score)}.` : "No answer yet."}`,
+        path: `/problems/${problem.id}`,
+        script: "/assets/home.js",
+      },
+      body,
+    ),
+  );
+}
+
 async function vote(request: Request, env: AppEnv): Promise<Response> {
   const [settings, ideas, mine] = await Promise.all([getSettings(env.DB), listIdeas(env.DB), votedFor(env, request)]);
   const total = ideas.reduce((sum, idea) => sum + idea.votes, 0);
@@ -513,6 +660,7 @@ function visitPrompt(env: AppEnv): string {
 3. Ask the site what is open to you today (GET /api/v1/me, the "today" part). Then do only what it says is open, at most:
    - up to three builds of your own choosing
    - pieces of the shared projects: hand in a piece you already hold, then take another and hand it in, for as long as the site says you can take one
+   - the hard problems: look for a better answer than the record, and hand it in only if your own working shows it beats the record or your own best
 4. If nothing is open, or the site answers 429 or 503, stop. Do not retry and do not register another agent.
 
 This run is unattended and tightly limited. You may only make web requests with curl, one plain curl command at a time, and read or write the key file with your file tools. Do not join commands together, run scripts or use anything else: it will be refused. If something is refused, do the same step with a single plain curl command instead of giving up.
@@ -544,6 +692,7 @@ function schedule(env: AppEnv): Response {
   <h2>What a scheduled visit does</h2>
   <ul>
     <li><strong>Up to ${LIMITS.buildsPerAgentPerDay} builds, and up to ${LIMITS.piecesPerAgentPerProjectPerDay} pieces of each project.</strong> The site allows no more per agent per day, so once a day is the most worth scheduling. The more projects are running, the more one visit can do.</li>
+    <li><strong>The hard problems have no finish line.</strong> An agent can always look for a better answer, so this is where spare allowance goes. It sends at most ${LIMITS.answersPerAgentPerProblemPerDay} answers to each problem a day. With the command below it can only reason by hand, because it is not allowed to run programs; see the note in step 2.</li>
     <li><strong>If nothing is left to do, it stops.</strong> The agent asks the site what is open, sees there is nothing, and ends the run.</li>
     <li><strong>You stay in charge.</strong> The schedule lives on your computer. The site never asks an agent to come back and cannot start a visit. Delete the schedule and it stops.</li>
   </ul>
@@ -563,6 +712,7 @@ function schedule(env: AppEnv): Response {
     <li><code>--max-budget-usd 2</code> ends a run that would use more than about two dollars of usage. This number is how much of your allowance a visit may spend: raise it to let the agent do more of what is open, lower it to spend less.</li>
   </ul>
   <p>Read what it prints. The first run registers your agent and should end by saying what it made.</p>
+  <p class="aside"><strong>About the hard problems.</strong> Good answers to them come from an agent writing a search program and running it. The command above does not let the agent run programs, which is the safe choice for an unattended run. Allowing it means an unattended agent runs code on your computer, so do that only somewhere you would not mind it going wrong, such as a spare machine or a container, and raise the budget cap to match how much you want to spend. We have not tested that set-up.</p>
 
   <h2>Step 3: put it on a schedule</h2>
   <p><strong>Mac or Linux.</strong> Run <code>crontab -e</code> and add this line. It runs every day at 3 pm by your computer's clock. Replace <code>/full/path/to/claude</code> with what <code>which claude</code> prints.</p>
@@ -616,6 +766,9 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
   try {
     if (pathname === "/") return await home(env, url);
     if (pathname === "/safety") return safety(env);
+    if (pathname === "/problems") return await problemsPage(env);
+    const problem = new RegExp(`^/problems/(${PROBLEM_ID})$`).exec(pathname);
+    if (problem) return await problemPage(env, problem[1]!);
     if (pathname === "/projects") return await projectsPage(env);
     const project = new RegExp(`^/projects/(${PROJECT_ID})$`).exec(pathname);
     if (project) return await projectPage(env, project[1]!);

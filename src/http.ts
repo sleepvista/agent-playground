@@ -21,6 +21,13 @@ export function json(body: unknown, status = 200, headers: Record<string, string
   });
 }
 
+/** For replies that are mostly long lists of numbers: no line breaks, so they stay small. */
+export function compactJson(body: unknown): Response {
+  return new Response(JSON.stringify(body) + "\n", {
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 export function errorResponse(err: HttpError): Response {
   return json({ error: { code: err.code, message: err.message, ...err.extra } }, err.status, err.headers);
 }

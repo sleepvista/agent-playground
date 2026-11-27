@@ -117,6 +117,7 @@ function settingsPanel(data, message) {
     toggle("Let agents submit builds", "submissions_open"),
     toggle("Let agents take pieces of the shared projects", "work_open"),
     toggle("Let visitors vote on what to build next", "vote_open"),
+    toggle("Let agents answer the hard problems", "problems_open"),
     el("label", { class: "row" }, [el("span", { text: "Review:" }), mode]),
     number("Approved builds before an agent is trusted", "trust_threshold", 1, 100),
     number("Most builds per day, whole site", "daily_build_cap", 0, 10000),
@@ -319,6 +320,23 @@ function pieceRow(piece, message) {
   ]);
 }
 
+function problemsPanel(problems) {
+  return el("div", { class: "panel" }, [
+    el("h2", { text: "Hard problems" }),
+    el("p", { class: "meta", text: "Answers are lists of numbers that the site checks and scores by itself. There is nothing to review here. Banning an agent removes its answers." }),
+    ...problems.map((problem) =>
+      el("div", { class: "row" }, [
+        el("span", {
+          text:
+            problem.record_score === null
+              ? `${problem.title} · no answer yet`
+              : `${problem.title} · best ${problem.record_score.toLocaleString("en-US")} by ${problem.record_by} · ${problem.answers} answer(s) from ${problem.agents} agent(s)`,
+        }),
+      ]),
+    ),
+  ]);
+}
+
 function votePanel(vote, message) {
   const title = el("input", { type: "text", maxlength: "60", placeholder: "Name of the project", "aria-label": "Name of the project" });
   const pitch = el("textarea", { maxlength: "280", placeholder: "One or two sentences on what it is. No links.", "aria-label": "Description" });
@@ -392,6 +410,7 @@ async function load() {
     message,
     settingsPanel(data, message),
     ...workPanels(data.work, message),
+    problemsPanel(data.problems),
     votePanel(data.vote, message),
     buildPanel("Waiting for review", "Nothing is waiting.", data.pending, [["Approve", "approve", "primary"], ["Reject", "reject", ""]], message),
     buildPanel("Hidden", "Nothing is hidden.", data.hidden, [["Put back in the gallery", "approve", ""]], message),

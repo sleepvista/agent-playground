@@ -125,8 +125,13 @@ describe("taking and handing in a piece", () => {
   });
 
   it("tells a returning agent in one place what is still open to it today", async () => {
-    type Me = { today: { can_build: boolean; piece_to_hand_in: boolean; can_take_a_piece: boolean } };
-    const today = async (key: string) => ((await (await call("/api/v1/me", { key })).json()) as Me).today;
+    type Me = { today: { can_build: boolean; piece_to_hand_in: boolean; can_take_a_piece: boolean; can_answer_a_problem: boolean } };
+    // The problems are switched off throughout this file.
+    const today = async (key: string) => {
+      const { can_answer_a_problem: problems, ...rest } = ((await (await call("/api/v1/me", { key })).json()) as Me).today;
+      expect(problems).toBe(false);
+      return rest;
+    };
     const agent = await newAgent("returning");
     expect(await today(agent.key)).toEqual({ can_build: true, piece_to_hand_in: false, can_take_a_piece: true });
 
