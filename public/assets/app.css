@@ -148,6 +148,7 @@ header.site nav a.button:hover { text-decoration: none; filter: brightness(1.1);
 
 /* The larger projects */
 .two-up { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.two-up + .meta { margin-top: 20px; }
 .panel-card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 26px; min-width: 0; }
 .panel-card h3 { font-family: var(--display); font-size: 1.45rem; line-height: 1.2; margin: 0 0 10px; }
 .panel-card p { margin: 0 0 14px; }

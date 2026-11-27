@@ -1,24 +1,25 @@
-import { LIMITS, PIECE_ID, WORK_ID, type AppEnv } from "./config";
+import { LIMITS, PIECE_ID, PROJECT_ID, WORK_ID, type AppEnv } from "./config";
 import { signPreview } from "./crypto";
 import { HttpError, json, readJson } from "./http";
 import { audit, iso } from "./store";
-import { listPieces, pieceStatus, type TestCase } from "./work";
+import { listProjects, pieceStatus, type TestCase } from "./work";
 
-/** The engine-project part of the admin overview. */
+/** The shared-projects part of the admin overview. */
 export async function workOverview(env: AppEnv, ts: number) {
-  const [pieces, waiting] = await Promise.all([
-    listPieces(env.DB, ts),
+  const [projects, waiting] = await Promise.all([
+    listProjects(env.DB, ts),
     env.DB
       .prepare(
-        `SELECT w.id, w.piece_id, p.title AS piece_title, w.agent_id, a.name AS agent_name, w.model, w.code_bytes,
-           w.submitted_at, (p.accepted_work_id IS NOT NULL) AS piece_done
-         FROM work w JOIN pieces p ON p.id = w.piece_id JOIN agents a ON a.id = w.agent_id
+        `SELECT w.id, w.piece_id, p.title AS piece_title, j.title AS project_title, w.agent_id, a.name AS agent_name, w.model,
+           w.code_bytes, w.submitted_at, (p.accepted_work_id IS NOT NULL) AS piece_done
+         FROM work w JOIN pieces p ON p.id = w.piece_id JOIN projects j ON j.id = w.project_id JOIN agents a ON a.id = w.agent_id
          WHERE w.status = 'submitted' ORDER BY w.submitted_at LIMIT 50`,
       )
       .all<{
         id: string;
         piece_id: string;
         piece_title: string;
+        project_title: string;
         agent_id: string;
         agent_name: string;
         model: string;
@@ -28,19 +29,25 @@ export async function workOverview(env: AppEnv, ts: number) {
       }>(),
   ]);
   return {
-    pieces: pieces.map((piece) => ({
-      id: piece.id,
-      title: piece.title,
-      status: pieceStatus(piece),
-      in_progress: piece.in_progress,
-      built_by: piece.built_by,
-      built_with: piece.built_with,
+    projects: projects.map((entry) => ({
+      id: entry.project.id,
+      title: entry.project.title,
+      complete: entry.complete,
+      pieces: entry.pieces.map((piece) => ({
+        id: piece.id,
+        title: piece.title,
+        status: pieceStatus(piece),
+        in_progress: piece.in_progress,
+        built_by: piece.built_by,
+        built_with: piece.built_with,
+      })),
     })),
-    work: await Promise.all(
+    waiting: await Promise.all(
       waiting.results.map(async (work) => ({
         id: work.id,
         piece_id: work.piece_id,
         piece_title: work.piece_title,
+        project_title: work.project_title,
         piece_done: work.piece_done === 1,
         agent_id: work.agent_id,
         agent_name: work.agent_name,
@@ -74,7 +81,7 @@ async function decide(env: AppEnv, workId: string, body: Record<string, unknown>
   }
 
   if (action === "accept") {
-    // A piece only ever enters the engine with every check passing.
+    // A piece only ever enters a project with every check passing.
     if (total === 0 || passed !== total) {
       throw new HttpError(409, "checks_failed", "A piece can only be accepted when it passes every check.");
     }
@@ -123,28 +130,65 @@ function tests(value: unknown, key: string): TestCase[] {
   return value as TestCase[];
 }
 
+function id(value: unknown, pattern: string, what: string): string {
+  if (typeof value !== "string" || !new RegExp(`^${pattern}$`).test(value)) {
+    throw new HttpError(400, "invalid_content", `"${String(value)}" is not a valid ${what} id.`);
+  }
+  return value;
+}
+
 /**
- * Loads or replaces the project's content: the pieces and the program that
- * runs on the finished engine. Content is written privately and loaded here;
- * it is not part of the public code. Replacing a piece keeps who built it.
+ * Loads or replaces one project: what it is, its pieces, and the program that
+ * runs on them once they are all built. Content is written privately and
+ * loaded here; it is not part of the public code. Loading a project again
+ * keeps who built what.
  */
 async function loadContent(env: AppEnv, body: Record<string, unknown>, ts: number): Promise<Response> {
-  const statements: D1PreparedStatement[] = [];
+  if (typeof body.project !== "object" || body.project === null) {
+    throw new HttpError(400, "invalid_content", '"project" must say which project this is: { id, title, summary }.');
+  }
+  const project = body.project as Record<string, unknown>;
+  const projectId = id(project.id, PROJECT_ID, "project");
   const pieces = Array.isArray(body.pieces) ? (body.pieces as Record<string, unknown>[]) : [];
+  if (pieces.length === 0) throw new HttpError(400, "invalid_content", "A project needs at least one piece.");
+  const showcase = typeof body.showcase === "object" && body.showcase !== null ? (body.showcase as Record<string, unknown>) : null;
+
+  const statements: D1PreparedStatement[] = [
+    // A new project goes to the end of the list. A showcase that is left out keeps the one already stored.
+    env.DB
+      .prepare(
+        `INSERT INTO projects (id, position, title, summary, showcase_title, showcase_note, showcase_code, updated_at)
+         VALUES (?1, (SELECT COALESCE(MAX(position), -1) + 1 FROM projects), ?2, ?3, COALESCE(?4, ''), COALESCE(?5, ''), COALESCE(?6, ''), ?7)
+         ON CONFLICT (id) DO UPDATE SET title = excluded.title, summary = excluded.summary,
+           showcase_title = COALESCE(?4, projects.showcase_title), showcase_note = COALESCE(?5, projects.showcase_note),
+           showcase_code = COALESCE(?6, projects.showcase_code), updated_at = excluded.updated_at`,
+      )
+      .bind(
+        projectId,
+        text(project.title, "title", LIMITS.projectTitleMax),
+        text(project.summary, "summary", LIMITS.projectSummaryMax),
+        showcase ? text(showcase.title, "title", 80) : null,
+        showcase ? text(showcase.note, "note", 500) : null,
+        showcase ? text(showcase.code, "code", 200_000) : null,
+        ts,
+      ),
+  ];
+  const pieceIds: string[] = [];
   pieces.forEach((piece, position) => {
-    const id = text(piece.id, "id", 31);
-    if (!new RegExp(`^${PIECE_ID}$`).test(id)) throw new HttpError(400, "invalid_content", `"${id}" is not a valid piece id.`);
+    const pieceId = id(piece.id, PIECE_ID, "piece");
+    pieceIds.push(pieceId);
     statements.push(
       env.DB
         .prepare(
-          `INSERT INTO pieces (id, position, title, summary, spec, public_tests, hidden_tests, reference_code, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO pieces (id, project_id, position, title, summary, spec, public_tests, hidden_tests, reference_code, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO UPDATE SET position = excluded.position, title = excluded.title, summary = excluded.summary,
              spec = excluded.spec, public_tests = excluded.public_tests, hidden_tests = excluded.hidden_tests,
              reference_code = excluded.reference_code, updated_at = excluded.updated_at`,
         )
         .bind(
-          id,
+          pieceId,
+          projectId,
           position,
           text(piece.title, "title", 80),
           text(piece.summary, "summary", 200),
@@ -156,24 +200,20 @@ async function loadContent(env: AppEnv, body: Record<string, unknown>, ts: numbe
         ),
     );
   });
-  if (typeof body.showcase === "object" && body.showcase !== null) {
-    const showcase = body.showcase as Record<string, unknown>;
-    statements.push(
-      env.DB
-        .prepare(
-          `INSERT INTO showcase (id, title, note, code, updated_at) VALUES (1, ?, ?, ?, ?)
-           ON CONFLICT (id) DO UPDATE SET title = excluded.title, note = excluded.note, code = excluded.code, updated_at = excluded.updated_at`,
-        )
-        .bind(text(showcase.title, "title", 80), text(showcase.note, "note", 500), text(showcase.code, "code", 200_000), ts),
-    );
-  }
-  if (statements.length === 0) throw new HttpError(400, "invalid_content", "Nothing to load.");
+  if (new Set(pieceIds).size !== pieceIds.length) throw new HttpError(400, "invalid_content", "Two pieces have the same id.");
+  // Piece ids are unique across the whole site, so a piece can never move between projects by accident.
+  const taken = await env.DB
+    .prepare(`SELECT id FROM pieces WHERE project_id <> ?1 AND id IN (${pieceIds.map((_, index) => `?${index + 2}`).join(", ")})`)
+    .bind(projectId, ...pieceIds)
+    .first<{ id: string }>();
+  if (taken) throw new HttpError(409, "piece_id_taken", `Another project already has a piece with the id "${taken.id}".`);
+
   await env.DB.batch(statements);
-  await audit(env.DB, "admin", "content_load", "engine", `${pieces.length} pieces`, ts);
-  return json({ loaded: { pieces: pieces.length, showcase: "showcase" in body } });
+  await audit(env.DB, "admin", "content_load", projectId, `${pieces.length} pieces`, ts);
+  return json({ loaded: { project: projectId, pieces: pieces.length, showcase: showcase !== null } });
 }
 
-/** Admin routes for the engine project. Returns null when the path is not one of them. */
+/** Admin routes for the shared projects. Returns null when the path is not one of them. */
 export async function handleWorkAdmin(request: Request, env: AppEnv, url: URL, ts: number): Promise<Response | null> {
   if (request.method !== "POST") return null;
   const { pathname } = url;

@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 5;
+export const SKILL_VERSION = 6;
 
 export const SITE_NAME = "Agent Playground";
 
@@ -16,6 +16,10 @@ export const LIMITS = {
   /** Whole request body: the code plus JSON escaping overhead. */
   requestMaxBytes: 450_000,
   smallRequestMaxBytes: 4_000,
+  /** How many builds one agent may submit in a UTC day. */
+  buildsPerAgentPerDay: 3,
+  /** How many pieces of any one project an agent may take in a UTC day. */
+  piecesPerAgentPerProjectPerDay: 3,
   registrationsPerIpPerDay: 3,
   submitAttemptsPerAgentPerDay: 10,
   reportsPerIpPerDay: 10,
@@ -32,6 +36,8 @@ export const LIMITS = {
   /** How many agents may be working on the same piece at once. */
   workersPerPiece: 3,
   contentRequestMaxBytes: 2_000_000,
+  projectTitleMax: 60,
+  projectSummaryMax: 280,
   ideaTitleMax: 60,
   ideaPitchMax: 280,
   ideasMax: 8,
@@ -51,7 +57,7 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 export interface Settings {
   registrations_open: boolean;
   submissions_open: boolean;
-  /** Whether agents may be handed pieces of the engine project. */
+  /** Whether agents may be handed pieces of the shared projects. */
   work_open: boolean;
   /** Whether visitors may vote on what agents build next. */
   vote_open: boolean;
@@ -78,6 +84,7 @@ export const BUILD_ID = "b_[0-9a-f]{24}";
 export const AGENT_ID = "ag_[0-9a-f]{24}";
 export const WORK_ID = "w_[0-9a-f]{24}";
 export const PIECE_ID = "[a-z][a-z0-9-]{1,30}";
+export const PROJECT_ID = "[a-z][a-z0-9-]{1,30}";
 
 export interface AppEnv {
   DB: D1Database;

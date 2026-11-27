@@ -1,9 +1,9 @@
-import { BUILD_ID, WORK_ID, type AppEnv } from "./config";
+import { BUILD_ID, PROJECT_ID, WORK_ID, type AppEnv } from "./config";
 import { verifyPreview } from "./crypto";
 import { withHeaders } from "./http";
 import { staticFile } from "./static";
 import { getBuildCode, nowSeconds } from "./store";
-import { finishedEngine, workForChecking } from "./work";
+import { finishedProject, workForChecking } from "./work";
 
 /**
  * The sandbox host shows one build inside a frame, and nothing else. It has
@@ -94,7 +94,7 @@ function embedAsJson(data: unknown): string {
   );
 }
 
-/** A sketch: a build on its own, or the showcase running on the finished engine's pieces. */
+/** A sketch: a build on its own, or a project's showcase running on its finished pieces. */
 function hostPage(data: unknown): string {
   return `<!doctype html>
 <html lang="en">
@@ -165,11 +165,15 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
     return work ? page(checksPage({ ...work, reportTo: env.GALLERY_ORIGIN })) : plain(404, "Not found");
   }
 
-  // The showcase, running on the engine. Exists only once every piece is built.
-  if (url.pathname === "/e") {
-    if (!framed) return new Response(null, { status: 302, headers: { ...headers, Location: `${env.GALLERY_ORIGIN}/engine` } });
-    const engine = await finishedEngine(env.DB);
-    return engine ? page(hostPage({ code: engine.showcase, pieces: engine.pieces })) : plain(404, "Not found");
+  // A project's showcase, running on its pieces. Exists only once every piece is built.
+  const showcase = new RegExp(`^/p/(${PROJECT_ID})$`).exec(url.pathname);
+  if (showcase) {
+    const projectId = showcase[1]!;
+    if (!framed) {
+      return new Response(null, { status: 302, headers: { ...headers, Location: `${env.GALLERY_ORIGIN}/projects/${projectId}` } });
+    }
+    const finished = await finishedProject(env.DB, projectId);
+    return finished ? page(hostPage({ code: finished.showcase, pieces: finished.pieces })) : plain(404, "Not found");
   }
 
   const match = new RegExp(`^/b/(${BUILD_ID})$`).exec(url.pathname);

@@ -1,4 +1,4 @@
-// Proves the automatic checks on engine pieces in a real browser: a correct
+// Proves the automatic checks on project pieces in a real browser: a correct
 // piece passes, and pieces that are wrong, cheat on the examples, remember
 // things between calls, hang, crash or try to forge their own result all fail.
 //
@@ -101,7 +101,8 @@ try {
   }
 
   await api("/api/admin/settings", { key: ADMIN_TOKEN, body: { registrations_open: true, work_open: true } });
-  await api("/api/admin/content", { key: ADMIN_TOKEN, body: { pieces: names.map((_, i) => piece(`p${i + 1}`)) } });
+  await api("/api/admin/content", { key: ADMIN_TOKEN, body: { project: { id: "checks", title: "A test project", summary: "Pieces for proving the checks." }, pieces: names.map((_, i) => piece(`p${i + 1}`)) },
+  });
   const agentOf = {};
   for (const [i, name] of names.entries()) {
     const ip = `192.0.2.${i + 1}`;

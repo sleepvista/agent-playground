@@ -76,7 +76,7 @@ describe("authentication", () => {
 });
 
 describe("submitting a build", () => {
-  it("holds a new build for review and allows one per day", async () => {
+  it("holds a new build for review and allows three per day", async () => {
     const agent = await newAgent("daily");
     const first = await submit(agent.key);
     expect(first.status).toBe(201);
@@ -84,13 +84,26 @@ describe("submitting a build", () => {
     expect(body.build.status).toBe("pending");
     expect(body.build.page_url).toBeNull();
 
-    const second = await submit(agent.key, { title: "Another one" });
-    expect(second.status).toBe(429);
-    expect(Number(second.headers.get("Retry-After"))).toBeGreaterThan(0);
-    expect(await code(second)).toBe("daily_limit");
+    type Me = { can_build_now: boolean; builds_left_today: number; today: { can_build: boolean } };
+    const me = async () => (await (await call("/api/v1/me", { key: agent.key })).json()) as Me;
+    expect(await me()).toMatchObject({ can_build_now: true, builds_left_today: 2, today: { can_build: true } });
 
-    const me = (await (await call("/api/v1/me", { key: agent.key })).json()) as { can_build_now: boolean };
-    expect(me.can_build_now).toBe(false);
+    const second = await submit(agent.key, { title: "Another one" });
+    expect(((await second.json()) as { builds_left_today: number }).builds_left_today).toBe(1);
+    expect((await submit(agent.key, { title: "A third one" })).status).toBe(201);
+
+    const fourth = await submit(agent.key, { title: "One too many" });
+    expect(fourth.status).toBe(429);
+    expect(Number(fourth.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect(await code(fourth)).toBe("daily_limit");
+    expect(await me()).toMatchObject({ can_build_now: false, builds_left_today: 0, today: { can_build: false } });
+
+    // The limit is the database's own rule: each build of the day takes a numbered slot, and a slot cannot be taken twice.
+    const slots = await db.prepare("SELECT slot FROM builds WHERE agent_id = ? ORDER BY slot").bind(agent.id).all<{ slot: number }>();
+    expect(slots.results.map((row) => row.slot)).toEqual([1, 2, 3]);
+    await expect(
+      db.prepare("UPDATE builds SET slot = 1 WHERE agent_id = ? AND slot = 2").bind(agent.id).run(),
+    ).rejects.toThrow(/UNIQUE/);
 
     // Not visible anywhere public while it waits.
     const feed = (await (await call("/api/v1/builds")).json()) as { builds: { id: string }[] };
@@ -100,12 +113,12 @@ describe("submitting a build", () => {
     expect((await call(`/b/${body.build.id}`, { base: SANDBOX, headers: { "Sec-Fetch-Dest": "iframe" } })).status).toBe(404);
   });
 
-  it("cannot be raced past the one-per-day rule", async () => {
+  it("cannot be raced past the three-a-day rule", async () => {
     const agent = await newAgent("racer");
-    const results = await Promise.all(Array.from({ length: 6 }, (_, i) => submit(agent.key, { title: `Race ${i}` })));
-    expect(results.filter((r) => r.status === 201)).toHaveLength(1);
+    const results = await Promise.all(Array.from({ length: 8 }, (_, i) => submit(agent.key, { title: `Race ${i}` })));
+    expect(results.filter((r) => r.status === 201)).toHaveLength(3);
     const rows = await db.prepare("SELECT COUNT(*) AS n FROM builds WHERE agent_id = ?").bind(agent.id).first<{ n: number }>();
-    expect(rows?.n).toBe(1);
+    expect(rows?.n).toBe(3);
   });
 
   it("rejects unsafe titles and notes without using up the day", async () => {
@@ -396,13 +409,15 @@ describe("storage layout", () => {
 
   it("stores no code for a submission that was refused", async () => {
     const agent = await newAgent("refused");
-    expect((await submit(agent.key)).status).toBe(201);
-    expect((await submit(agent.key, { title: "Second try" })).status).toBe(429);
+    // Sent at once, so some are refused by the database itself and not by the check made before it.
+    const results = await Promise.all(Array.from({ length: 6 }, (_, i) => submit(agent.key, { title: `Try ${i}` })));
+    expect(results.map((r) => r.status).sort()).toEqual([201, 201, 201, 429, 429, 429]);
+    expect((await submit(agent.key, { title: "One more try" })).status).toBe(429);
     const rows = await db
       .prepare("SELECT COUNT(*) AS n FROM build_code WHERE build_id IN (SELECT id FROM builds WHERE agent_id = ?)")
       .bind(agent.id)
       .first<{ n: number }>();
-    expect(rows?.n).toBe(1);
+    expect(rows?.n).toBe(3);
     const orphans = await db.prepare("SELECT COUNT(*) AS n FROM build_code WHERE build_id NOT IN (SELECT id FROM builds)").first<{ n: number }>();
     expect(orphans?.n).toBe(0);
   });

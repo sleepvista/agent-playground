@@ -7,7 +7,8 @@ import {
   createAgent,
   createBuild,
   findAgentByKeyHash,
-  findBuildForDay,
+  countBuildsForDay,
+  latestBuildForDay,
   getBuildMeta,
   getSettings,
   hit,
@@ -71,7 +72,8 @@ async function getStatus(env: AppEnv, ts: number): Promise<Response> {
     submissions_open: settings.submissions_open,
     review: settings.moderation_mode === "review" ? "every build is reviewed by a human before it appears" : "builds from new agents are reviewed by a human before they appear",
     limits: {
-      builds_per_agent_per_utc_day: 1,
+      builds_per_agent_per_utc_day: LIMITS.buildsPerAgentPerDay,
+      pieces_per_agent_per_project_per_utc_day: LIMITS.piecesPerAgentPerProjectPerDay,
       code_max_bytes: LIMITS.codeMaxBytes,
       title_max_chars: LIMITS.titleMax,
       note_max_chars: LIMITS.noteMax,
@@ -119,18 +121,22 @@ async function register(request: Request, env: AppEnv, ts: number): Promise<Resp
 
 async function me(request: Request, env: AppEnv, ts: number): Promise<Response> {
   const agent = await requireAgent(request, env, ts);
-  const [today, settings, engine] = await Promise.all([
-    findBuildForDay(env.DB, agent.id, utcDay(ts)),
+  const day = utcDay(ts);
+  const [latest, built, settings, work] = await Promise.all([
+    latestBuildForDay(env.DB, agent.id, day),
+    countBuildsForDay(env.DB, agent.id, day),
     getSettings(env.DB),
     workToday(env, agent.id, ts),
   ]);
+  const left = Math.max(0, LIMITS.buildsPerAgentPerDay - built);
   return json({
     agent: { id: agent.id, name: agent.name, registered_at: iso(agent.created_at) },
     // Everything still open to this agent today. When all three are false there is nothing to do.
-    today: { can_build: today === null && settings.submissions_open, ...engine },
-    can_build_now: today === null,
-    next_build_at: today === null ? iso(ts) : iso(nextDayStart(ts)),
-    todays_build: today === null ? null : ownBuild(env, today),
+    today: { can_build: left > 0 && settings.submissions_open, ...work },
+    can_build_now: left > 0,
+    builds_left_today: left,
+    next_build_at: left > 0 ? iso(ts) : iso(nextDayStart(ts)),
+    todays_build: latest === null ? null : ownBuild(env, latest),
   });
 }
 
@@ -150,8 +156,12 @@ async function submitBuild(request: Request, env: AppEnv, ts: number): Promise<R
   if (await overLimit(env.DB, `submit:${agent.id}`, 86400, LIMITS.submitAttemptsPerAgentPerDay, ts)) {
     throw retryAt(ts, "too_many_attempts", "Too many submission attempts today. Stop and try again tomorrow.");
   }
-  const alreadyBuilt = retryAt(ts, "daily_limit", "This agent already submitted a build today. One build per UTC day.");
-  if (await findBuildForDay(env.DB, agent.id, utcDay(ts))) throw alreadyBuilt;
+  const alreadyBuilt = retryAt(
+    ts,
+    "daily_limit",
+    `This agent has made its ${LIMITS.buildsPerAgentPerDay} builds for today. ${LIMITS.buildsPerAgentPerDay} builds per UTC day.`,
+  );
+  if ((await countBuildsForDay(env.DB, agent.id, utcDay(ts))) >= LIMITS.buildsPerAgentPerDay) throw alreadyBuilt;
 
   const body = await readJson(request, LIMITS.requestMaxBytes);
   const title = checkPlainText(body.title, "title", LIMITS.titleMin, LIMITS.titleMax);
@@ -176,8 +186,12 @@ async function submitBuild(request: Request, env: AppEnv, ts: number): Promise<R
       createdAt: ts,
     },
     settings.daily_build_cap,
+    LIMITS.buildsPerAgentPerDay,
   );
-  if (result === "already_built_today") throw alreadyBuilt;
+  if (result === "daily_limit") throw alreadyBuilt;
+  if (result === "collision") {
+    throw new HttpError(409, "try_again", "Two submissions from this agent arrived at the same moment. Send this one again.");
+  }
   if (result === "site_cap") {
     throw retryAt(ts, "site_daily_cap", "The playground has reached its limit of builds for today.");
   }
@@ -189,7 +203,7 @@ async function submitBuild(request: Request, env: AppEnv, ts: number): Promise<R
         ? "Your build is live in the gallery."
         : "Your build is waiting for a human to review it. There is nothing more to do; do not poll.",
       warnings: checked.warnings,
-      next_build_at: iso(nextDayStart(ts)),
+      builds_left_today: Math.max(0, LIMITS.buildsPerAgentPerDay - (await countBuildsForDay(env.DB, agent.id, utcDay(ts)))),
     },
     201,
   );

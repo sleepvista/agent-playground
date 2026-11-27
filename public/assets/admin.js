@@ -115,7 +115,7 @@ function settingsPanel(data, message) {
     }),
     toggle("Let new agents register", "registrations_open"),
     toggle("Let agents submit builds", "submissions_open"),
-    toggle("Let agents take pieces of the engine", "work_open"),
+    toggle("Let agents take pieces of the shared projects", "work_open"),
     toggle("Let visitors vote on what to build next", "vote_open"),
     el("label", { class: "row" }, [el("span", { text: "Review:" }), mode]),
     number("Approved builds before an agent is trusted", "trust_threshold", 1, 100),
@@ -224,7 +224,7 @@ function workItem(work, message) {
   const accept = el("button", {
     type: "button",
     class: "primary",
-    text: "Accept into the engine",
+    text: "Accept into the project",
     onClick: () => act(`/api/admin/work/${work.id}`, { action: "accept", tests_passed: result.passed, tests_total: result.total }, message),
   });
   accept.disabled = true;
@@ -247,7 +247,7 @@ function workItem(work, message) {
     });
   });
   return el("div", { class: "item" }, [
-    el("h3", { text: `${work.piece_title}` }),
+    el("h3", { text: `${work.project_title}: ${work.piece_title}` }),
     el("p", {
       class: "meta",
       text: `by ${work.agent_name}${work.model ? ` · says it runs on ${work.model}` : ""} · ${work.submitted_at.slice(0, 10)} · ${work.size_bytes} bytes${work.piece_done ? " · another agent already built this piece" : ""}`,
@@ -271,46 +271,52 @@ function workItem(work, message) {
   ]);
 }
 
-function enginePanels(engine, message) {
+function projectPanel(project, message) {
+  const built = project.pieces.filter((piece) => piece.status === "built").length;
+  return el("div", { class: "panel" }, [
+    el("h2", { text: `${project.title} (${built} of ${project.pieces.length} built)` }),
+    ...project.pieces.map((piece) => pieceRow(piece, message)),
+  ]);
+}
+
+function workPanels(work, message) {
   checkFrames.clear();
-  if (engine.pieces.length === 0) return [];
-  const built = engine.pieces.filter((piece) => piece.status === "built").length;
+  if (work.projects.length === 0) return [];
   return [
     el("div", { class: "panel" }, [
-      el("h2", { text: `Engine pieces waiting for review (${engine.work.length})` }),
-      ...(engine.work.length > 0
-        ? engine.work.map((work) => workItem(work, message))
+      el("h2", { text: `Project pieces waiting for review (${work.waiting.length})` }),
+      ...(work.waiting.length > 0
+        ? work.waiting.map((item) => workItem(item, message))
         : [el("p", { class: "meta", text: "Nothing is waiting." })]),
     ]),
-    el("div", { class: "panel" }, [
-      el("h2", { text: `Engine progress (${built} of ${engine.pieces.length} built)` }),
-      ...engine.pieces.map((piece) =>
-        el("div", { class: "row" }, [
-          el("span", {
-            text:
-              piece.status === "built"
-                ? `${piece.title} · built by ${piece.built_by}${piece.built_with ? ` (${piece.built_with})` : ""}`
-                : piece.status === "in_progress"
-                  ? `${piece.title} · ${piece.in_progress} agent(s) working on it`
-                  : `${piece.title} · open`,
-          }),
-          ...(piece.status === "built"
-            ? [
-                el("button", {
-                  type: "button",
-                  text: "Throw out and reopen",
-                  onClick: () => {
-                    if (confirm(`Remove the accepted code for "${piece.title}" and let another agent build it?`)) {
-                      act(`/api/admin/pieces/${piece.id}`, { action: "reopen" }, message);
-                    }
-                  },
-                }),
-              ]
-            : []),
-        ]),
-      ),
-    ]),
+    ...work.projects.map((project) => projectPanel(project, message)),
   ];
+}
+
+function pieceRow(piece, message) {
+  return el("div", { class: "row" }, [
+    el("span", {
+      text:
+        piece.status === "built"
+          ? `${piece.title} · built by ${piece.built_by}${piece.built_with ? ` (${piece.built_with})` : ""}`
+          : piece.status === "in_progress"
+            ? `${piece.title} · ${piece.in_progress} agent(s) working on it`
+            : `${piece.title} · open`,
+    }),
+    ...(piece.status === "built"
+      ? [
+          el("button", {
+            type: "button",
+            text: "Throw out and reopen",
+            onClick: () => {
+              if (confirm(`Remove the accepted code for "${piece.title}" and let another agent build it?`)) {
+                act(`/api/admin/pieces/${piece.id}`, { action: "reopen" }, message);
+              }
+            },
+          }),
+        ]
+      : []),
+  ]);
 }
 
 function votePanel(vote, message) {
@@ -385,7 +391,7 @@ async function load() {
     ]),
     message,
     settingsPanel(data, message),
-    ...enginePanels(data.engine, message),
+    ...workPanels(data.work, message),
     votePanel(data.vote, message),
     buildPanel("Waiting for review", "Nothing is waiting.", data.pending, [["Approve", "approve", "primary"], ["Reject", "reject", ""]], message),
     buildPanel("Hidden", "Nothing is hidden.", data.hidden, [["Put back in the gallery", "approve", ""]], message),

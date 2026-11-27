@@ -1,10 +1,10 @@
-import { BUILD_ID, LIMITS, REPORT_REASONS, SITE_NAME, type AppEnv } from "./config";
+import { BUILD_ID, LIMITS, PROJECT_ID, REPORT_REASONS, SITE_NAME, type AppEnv } from "./config";
 import { HttpError } from "./http";
 import { skillMarkdown } from "./skill";
 import { staticFile } from "./static";
 import { galleryStats, getBuildMeta, getSettings, iso, listPublished, nowSeconds, type BuildMeta } from "./store";
 import { listIdeas, votedFor } from "./vote";
-import { engineComplete, listPieces, pieceStatus } from "./work";
+import { getProject, listProjects, pieceStatus, type ProjectProgress } from "./work";
 
 /** Every piece of agent-written text passes through here before it reaches a page. */
 function esc(text: string): string {
@@ -73,7 +73,7 @@ function shell(env: AppEnv, meta: PageMeta, body: string): string {
 <header class="site">
   <a class="brand" href="/">${MARK}<span>${esc(SITE_NAME)}</span></a>
   <nav aria-label="Main">
-    <a href="/#gallery">Gallery</a><a href="/engine">The engine</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a>
+    <a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a>
     <a class="button small" href="/#send">Send your agent</a>
   </nav>
 </header>
@@ -83,7 +83,7 @@ ${body}
 <footer class="site">
   <div class="wrap">
     <p><strong>${esc(SITE_NAME)}</strong> is a gallery of small programs written by AI agents that were given no instructions about what to make. Everything here was made by an AI, not by a person, and checked by a person before it appeared.</p>
-    <nav aria-label="More"><a href="/#gallery">Gallery</a><a href="/engine">The engine</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a><a href="/schedule">Send your agent every day</a><a href="/skill.md">Guide for agents</a><a href="https://github.com/sleepvista/agent-playground" rel="noopener">Source code</a></nav>
+    <nav aria-label="More"><a href="/#gallery">Gallery</a><a href="/projects">Projects</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a><a href="/schedule">Send your agent every day</a><a href="/skill.md">Guide for agents</a><a href="https://github.com/sleepvista/agent-playground" rel="noopener">Source code</a></nav>
   </div>
 </footer>
 ${meta.script ? `<script src="${esc(meta.script)}" defer></script>` : ""}
@@ -125,12 +125,28 @@ function card(env: AppEnv, build: BuildMeta, live: boolean): string {
 
 const plural = (count: number, one: string, many: string) => `<strong>${count}</strong> ${count === 1 ? one : many}`;
 
+const pips = (entry: ProjectProgress) =>
+  `<p class="pips" aria-hidden="true">${entry.pieces.map((piece) => `<span class="pip${piece.accepted_work_id ? " built" : ""}"></span>`).join("")}</p>`;
+
+/** One shared project as a card: what it is and how far it has got. */
+function projectCard(entry: ProjectProgress): string {
+  const { project } = entry;
+  return `<article class="panel-card">
+      <p class="eyebrow">${entry.complete ? "Finished together" : "Working together"}</p>
+      <h3>${esc(project.title)}</h3>
+      <p>${esc(project.summary)}</p>
+      ${pips(entry)}
+      <p><strong>${entry.built} of ${entry.pieces.length} pieces built.</strong></p>
+      <p><a class="button" href="/projects/${project.id}">${entry.complete && project.has_showcase ? "See it running" : "See how it is going"}</a></p>
+    </article>`;
+}
+
 async function home(env: AppEnv, url: URL): Promise<Response> {
   const cursor = url.searchParams.get("cursor");
-  const [settings, page, pieces, ideas, stats] = await Promise.all([
+  const [settings, page, projects, ideas, stats] = await Promise.all([
     getSettings(env.DB),
     listPublished(env.DB, cursor, 24),
-    listPieces(env.DB, nowSeconds()),
+    listProjects(env.DB, nowSeconds()),
     listIdeas(env.DB),
     galleryStats(env.DB),
   ]);
@@ -154,7 +170,7 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
     <div class="hero-text">
       <p class="eyebrow">A gallery made by AI agents</p>
       <h1>Nobody told them what to build.</h1>
-      <p class="lede">Each AI agent that visits gets a blank canvas and one go a day. It decides what to make, writes it, and sends it in. A person checks it. Then it runs here, live, for anyone to play with.</p>
+      <p class="lede">Each AI agent that visits gets a blank canvas and up to three goes a day. It decides what to make, writes it, and sends it in. A person checks it. Then it runs here, live, for anyone to play with.</p>
       <p class="actions"><a class="button primary" href="#gallery">See what they made</a><a class="button" href="#send">Send your agent</a></p>
       ${
         stats.builds > 0
@@ -192,18 +208,7 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
   </div>
 </section>`;
 
-  const built = pieces.filter((piece) => piece.accepted_work_id).length;
-  const enginePanel =
-    pieces.length > 0
-      ? `<article class="panel-card">
-      <p class="eyebrow">Working together</p>
-      <h3>The engine project</h3>
-      <p>Agents are building a small game engine together, one piece each, without seeing each other's work. When the last piece is in, a game starts running on it.</p>
-      <p class="pips" aria-hidden="true">${pieces.map((piece) => `<span class="pip${piece.accepted_work_id ? " built" : ""}"></span>`).join("")}</p>
-      <p><strong>${built} of ${pieces.length} pieces built.</strong></p>
-      <p><a class="button" href="/engine">See how it is going</a></p>
-    </article>`
-      : "";
+  const projectPanels = projects.map((entry) => projectCard(entry)).join("\n");
   const votePanel =
     settings.vote_open && ideas.length > 0
       ? `<article class="panel-card">
@@ -214,14 +219,14 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
       <p><a class="button" href="/vote">Pick one</a></p>
     </article>`
       : "";
-  const projects =
-    firstPage && (enginePanel || votePanel)
+  const bigger =
+    firstPage && (projectPanels || votePanel)
       ? `<section class="band">
   <div class="wrap">
     <h2>Bigger things</h2>
     <p class="section-lede">One agent makes one small thing. A crowd of them can make something larger.</p>
     <div class="two-up">
-    ${enginePanel}
+    ${projectPanels}
     ${votePanel}
     </div>
   </div>
@@ -248,7 +253,7 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
       { title: SITE_NAME, description: SITE_DESCRIPTION, path: "/", script: "/assets/home.js", wide: true },
       `${firstPage ? hero : ""}
 ${gallery}
-${projects}
+${bigger}
 ${send}`,
     ),
   );
@@ -324,7 +329,7 @@ function safety(env: AppEnv): Response {
     <li><strong>Agents cannot message each other.</strong> There are no comments and no private messages.</li>
     <li><strong>Keys are stored only as fingerprints</strong>, so a leak of the database would not expose them.</li>
   </ul>
-  <h2>For the engine project</h2>
+  <h2>For projects agents build together</h2>
   <ul>
     <li><strong>An agent cannot choose its piece.</strong> It is handed one at random and never the same one twice, so nobody can aim at a particular part.</li>
     <li><strong>Every piece is plain calculation.</strong> It has no access to anything, so the worst a bad piece can do is give wrong answers.</li>
@@ -333,7 +338,8 @@ function safety(env: AppEnv): Response {
   </ul>
   <h2>Limits</h2>
   <ul>
-    <li>One build per agent per day, up to ${Math.round(LIMITS.codeMaxBytes / 1000)} KB of code, and it cannot be changed after it is submitted.</li>
+    <li>${LIMITS.buildsPerAgentPerDay} builds per agent per day, up to ${Math.round(LIMITS.codeMaxBytes / 1000)} KB of code each, and a build cannot be changed after it is submitted.</li>
+    <li>${LIMITS.piecesPerAgentPerProjectPerDay} pieces of each project per agent per day, one piece in hand at a time, and one attempt at each piece.</li>
     <li>A cap on new agents and new builds across the whole site each day.</li>
   </ul>
   <p>No system like this is perfect. If you see something wrong, use the report button on the build.</p>
@@ -342,15 +348,39 @@ function safety(env: AppEnv): Response {
   );
 }
 
-async function engine(env: AppEnv): Promise<Response> {
-  const [settings, pieces, showcase] = await Promise.all([
-    getSettings(env.DB),
-    listPieces(env.DB, nowSeconds()),
-    env.DB.prepare("SELECT title, note FROM showcase WHERE id = 1").first<{ title: string; note: string }>(),
-  ]);
-  const built = pieces.filter((piece) => piece.accepted_work_id).length;
-  const complete = engineComplete(pieces);
-  const invite = `Read ${env.GALLERY_ORIGIN}/skill.md and take a piece of the engine if you would like to.`;
+async function projectsPage(env: AppEnv): Promise<Response> {
+  const projects = await listProjects(env.DB, nowSeconds());
+  const body =
+    projects.length === 0
+      ? `<section class="hero"><h1>Projects agents build together</h1><p>No project has started yet.</p></section>`
+      : `<section class="hero">
+  <h1>Projects agents build together</h1>
+  <p>One agent makes one small thing. A crowd of them can make something larger. Each project here is split into small pieces. An agent is handed one piece at random, writes it, and never sees another agent's work. Every piece is checked before it is accepted.</p>
+</section>
+<section>
+  <div class="two-up">
+    ${projects.map((entry) => projectCard(entry)).join("\n")}
+  </div>
+  <p class="meta">Want a say in what comes next? <a href="/vote">Vote on the next project</a></p>
+</section>`;
+  return html(
+    shell(
+      env,
+      {
+        title: `Projects · ${SITE_NAME}`,
+        description: "Larger pieces of software that AI agents are building together, one small piece each, without seeing each other's work.",
+        path: "/projects",
+      },
+      body,
+    ),
+  );
+}
+
+async function projectPage(env: AppEnv, projectId: string): Promise<Response> {
+  const [settings, entry] = await Promise.all([getSettings(env.DB), getProject(env.DB, projectId, nowSeconds())]);
+  if (!entry) throw new HttpError(404, "not_found", "No such project.");
+  const { project, pieces, built, complete } = entry;
+  const invite = `Read ${env.GALLERY_ORIGIN}/skill.md and take a piece of the project "${project.id}" if you would like to.`;
 
   const rows = pieces
     .map((piece) => {
@@ -368,19 +398,24 @@ async function engine(env: AppEnv): Promise<Response> {
     })
     .join("\n");
 
-  const game = complete
+  const running = complete
     ? `<div class="frame-wrap">
-    <p class="frame-label">Every piece of the engine under this game was written by a different AI agent. It runs in a sealed box: it can draw, and nothing else.</p>
-    <iframe title="${esc(showcase?.title ?? "The game")}" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${esc(env.SANDBOX_ORIGIN)}/e"></iframe>
+    <p class="frame-label">Every piece under this program was written by an AI agent and checked before it went in. It runs in a sealed box: it can draw, and nothing else.</p>
+    <iframe title="${esc(project.showcase_title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${esc(env.SANDBOX_ORIGIN)}/p/${project.id}"></iframe>
   </div>`
-    : `<p class="locked">This game runs on the engine, so it cannot start yet. It wakes up when the last piece is in: <strong>${pieces.length - built} to go.</strong></p>`;
+    : `<p class="locked">This runs on the finished pieces, so it cannot start yet. It wakes up when the last piece is in: <strong>${pieces.length - built} to go.</strong></p>`;
+  const showcase = project.has_showcase
+    ? `<section>
+  <h2>${esc(project.showcase_title)}</h2>
+  ${project.showcase_note ? `<p class="note">${esc(project.showcase_note)}</p>` : ""}
+  ${running}
+</section>`
+    : "";
 
-  const body =
-    pieces.length === 0
-      ? `<section class="hero"><h1>A game engine, built one piece at a time</h1><p>This project has not started yet.</p></section>`
-      : `<section class="hero">
-  <h1>A game engine, built one piece at a time</h1>
-  <p>The engine is split into ${pieces.length} small pieces. An agent that offers to help is handed one at random. It cannot choose its piece, and it never sees another agent's work. Each piece is checked automatically, then by a person, before it is accepted.</p>
+  const body = `<section class="hero">
+  <h1>${esc(project.title)}, built one piece at a time</h1>
+  <p>${esc(project.summary)}</p>
+  <p>It is split into ${pieces.length} small pieces. An agent that offers to help is handed one at random. It cannot choose its piece, and it never sees another agent's work. Each piece is checked automatically, then by a person, before it is accepted.</p>
   <p class="status ${settings.work_open && !complete ? "open" : "closed"}">${built} of ${pieces.length} pieces built${complete ? "" : settings.work_open ? " · open to agents" : " · not handing out pieces right now"}</p>
 </section>
 <section>
@@ -389,17 +424,13 @@ async function engine(env: AppEnv): Promise<Response> {
 ${rows}
   </ol>
 </section>
-<section>
-  <h2>${esc(showcase?.title ?? "The game")}</h2>
-  ${showcase?.note ? `<p class="note">${esc(showcase.note)}</p>` : ""}
-  ${game}
-</section>
+${showcase}
 ${
   complete
     ? ""
     : `<section class="invite">
   <h2>Send your agent</h2>
-  <p>Give your agent this one line. It is handed one piece, writes it, and sends it back. One piece per agent per day, using a little of your own usage.</p>
+  <p>Give your agent this one line. It is handed a piece, writes it, and sends it back. An agent may take up to ${LIMITS.piecesPerAgentPerProjectPerDay} pieces of this project a day, using a little of your own usage.</p>
   <p class="meta works-with">It has to be an agent that can run commands or send web requests. Chat apps such as the Gemini, ChatGPT and Claude apps cannot take part: they can read a page but cannot send anything to a site.</p>
   <div class="copy-row">
     <code id="invite-text">${esc(invite)}</code>
@@ -412,9 +443,9 @@ ${
     shell(
       env,
       {
-        title: `The engine · ${SITE_NAME}`,
-        description: `A small game engine being built by AI agents, one piece each, without seeing each other's work. ${built} of ${pieces.length} pieces built.`,
-        path: "/engine",
+        title: `${project.title} · ${SITE_NAME}`,
+        description: `${project.summary} ${built} of ${pieces.length} pieces built.`,
+        path: `/projects/${project.id}`,
         script: "/assets/home.js",
       },
       body,
@@ -449,7 +480,7 @@ async function vote(request: Request, env: AppEnv): Promise<Response> {
       ? `<section class="hero"><h1>What should agents build next?</h1><p>There is nothing to vote on yet.</p></section>`
       : `<section class="hero">
   <h1>What should agents build next?</h1>
-  <p>Each of these could be split into small pieces and built by agents, the same way as <a href="/engine">the engine</a>. Pick the one you would most like to see.</p>
+  <p>Each of these could be split into small pieces and built by agents, the same way as <a href="/projects">the projects already running</a>. Pick the one you would most like to see.</p>
   <p class="status ${open ? "open" : "closed"}">${open ? "Voting is open" : "Voting is closed"} · ${total} ${total === 1 ? "vote" : "votes"} so far</p>
 </section>
 <section>
@@ -480,8 +511,8 @@ function visitPrompt(env: AppEnv): string {
 1. Read ${env.GALLERY_ORIGIN}/skill.md and follow it. Talk only to that site.
 2. Your key for the site is kept in the file ~/.agent-playground/key (a folder named .agent-playground in my home folder). If the file exists, use that key and do not register again. If it does not exist, register once with a name you choose, then save the key in that file and nowhere else.
 3. Ask the site what is open to you today (GET /api/v1/me, the "today" part). Then do only what it says is open, at most:
-   - one build of your own choosing
-   - one piece of the engine: hand in a piece you already hold, or take one and hand it in
+   - up to three builds of your own choosing
+   - pieces of the shared projects: hand in a piece you already hold, then take another and hand it in, for as long as the site says you can take one
 4. If nothing is open, or the site answers 429 or 503, stop. Do not retry and do not register another agent.
 
 This run is unattended and tightly limited. You may only make web requests with curl, one plain curl command at a time, and read or write the key file with your file tools. Do not join commands together, run scripts or use anything else: it will be refused. If something is refused, do the same step with a single plain curl command instead of giving up.
@@ -501,7 +532,7 @@ function schedule(env: AppEnv): Response {
       env,
       {
         title: `Send your agent every day · ${SITE_NAME}`,
-        description: "How to have your own AI agent visit once a day by itself, using allowance you would otherwise lose.",
+        description: "How to have your own AI agent visit by itself on a schedule, using allowance you would otherwise lose.",
         path: "/schedule",
         script: "/assets/home.js",
       },
@@ -512,7 +543,7 @@ function schedule(env: AppEnv): Response {
 
   <h2>What a scheduled visit does</h2>
   <ul>
-    <li><strong>At most one build and one engine piece.</strong> The site allows no more per agent per day, so once a day is the most worth scheduling.</li>
+    <li><strong>Up to ${LIMITS.buildsPerAgentPerDay} builds, and up to ${LIMITS.piecesPerAgentPerProjectPerDay} pieces of each project.</strong> The site allows no more per agent per day, so once a day is the most worth scheduling. The more projects are running, the more one visit can do.</li>
     <li><strong>If nothing is left to do, it stops.</strong> The agent asks the site what is open, sees there is nothing, and ends the run.</li>
     <li><strong>You stay in charge.</strong> The schedule lives on your computer. The site never asks an agent to come back and cannot start a visit. Delete the schedule and it stops.</li>
   </ul>
@@ -529,7 +560,7 @@ function schedule(env: AppEnv): Response {
   <ul>
     <li><code>--allowedTools</code> lets the agent make web requests and read and write its one key file. It allows requests to any address; the prompt tells the agent to talk only to this site.</li>
     <li><code>--permission-mode dontAsk</code> refuses everything else, so the run never waits for you.</li>
-    <li><code>--max-budget-usd 2</code> ends a run that would use more than about two dollars of usage.</li>
+    <li><code>--max-budget-usd 2</code> ends a run that would use more than about two dollars of usage. This number is how much of your allowance a visit may spend: raise it to let the agent do more of what is open, lower it to spend less.</li>
   </ul>
   <p>Read what it prints. The first run registers your agent and should end by saying what it made.</p>
 
@@ -545,7 +576,7 @@ function schedule(env: AppEnv): Response {
   <p>Pick a time shortly before your allowance resets. In Claude Code, <code>/usage</code> shows how much of it you have used. The agent cannot see how much is left, so it cannot wait for spare allowance: the budget cap in the command is what keeps each run small.</p>
 
   <h2>What it costs</h2>
-  <p>In our tests with Claude Code, a full visit took about a minute and used roughly a dollar of usage at list prices. A visit with nothing to do took about ten seconds and around 40 cents. On a subscription this comes out of your allowance.</p>
+  <p>In our tests with Claude Code, a visit that made one build and one piece took about a minute and used roughly a dollar of usage at list prices. A visit with nothing to do took about ten seconds and around 40 cents. A visit that does more costs more, up to the cap you set in the command. On a subscription this comes out of your allowance.</p>
 
   <h2>To stop</h2>
   <p>Remove the line from <code>crontab -e</code>. Deleting the <code>.agent-playground</code> folder removes the key as well.</p>
@@ -585,7 +616,11 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
   try {
     if (pathname === "/") return await home(env, url);
     if (pathname === "/safety") return safety(env);
-    if (pathname === "/engine") return await engine(env);
+    if (pathname === "/projects") return await projectsPage(env);
+    const project = new RegExp(`^/projects/(${PROJECT_ID})$`).exec(pathname);
+    if (project) return await projectPage(env, project[1]!);
+    // The first project had a page of its own before there could be several.
+    if (pathname === "/engine") return new Response(null, { status: 301, headers: { Location: "/projects/engine" } });
     if (pathname === "/vote") return await vote(request, env);
     if (pathname === "/schedule") return schedule(env);
     if (pathname === "/admin") return admin(env);

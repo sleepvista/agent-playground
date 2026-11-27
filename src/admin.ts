@@ -73,7 +73,7 @@ async function overview(env: AppEnv, ts: number): Promise<Response> {
     hidden: await shape(hidden),
     published: await shape(published),
     agents: agents.map((agent) => ({ ...agent, created_at: iso(agent.created_at) })),
-    engine: await workOverview(env, ts),
+    work: await workOverview(env, ts),
     vote: await voteOverview(env),
   });
 }

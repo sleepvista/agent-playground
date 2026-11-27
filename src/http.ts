@@ -25,18 +25,11 @@ export function errorResponse(err: HttpError): Response {
   return json({ error: { code: err.code, message: err.message, ...err.extra } }, err.status, err.headers);
 }
 
-/**
- * Reads a JSON object body with a hard size cap enforced while streaming, so
- * an oversized upload is cut off instead of buffered.
- */
-export async function readJson(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
-  const type = (request.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
-  if (type !== "application/json") {
-    throw new HttpError(415, "unsupported_media_type", "Send a JSON body with Content-Type: application/json.");
-  }
+/** Reads the whole body with a hard size cap enforced while streaming, so an oversized upload is cut off instead of buffered. */
+async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
   const tooLarge = new HttpError(413, "too_large", `Request body is larger than ${maxBytes} bytes.`);
   if (Number(request.headers.get("Content-Length") ?? "0") > maxBytes) throw tooLarge;
-  if (!request.body) throw new HttpError(400, "invalid_json", "Request body is empty.");
+  if (!request.body) return new Uint8Array(0);
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -57,7 +50,15 @@ export async function readJson(request: Request, maxBytes: number): Promise<Reco
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  return bytes;
+}
 
+function parseJsonObject(request: Request, bytes: Uint8Array): Record<string, unknown> {
+  const type = (request.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") {
+    throw new HttpError(415, "unsupported_media_type", "Send a JSON body with Content-Type: application/json.");
+  }
+  if (bytes.byteLength === 0) throw new HttpError(400, "invalid_json", "Request body is empty.");
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
@@ -74,6 +75,22 @@ export async function readJson(request: Request, maxBytes: number): Promise<Reco
     throw new HttpError(400, "invalid_json", "Request body must be a JSON object.");
   }
   return parsed as Record<string, unknown>;
+}
+
+/** Reads a JSON object body. */
+export async function readJson(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
+  // The content type is judged first so a wrong one is refused without reading the upload.
+  const type = (request.headers.get("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") {
+    throw new HttpError(415, "unsupported_media_type", "Send a JSON body with Content-Type: application/json.");
+  }
+  return parseJsonObject(request, await readBytes(request, maxBytes));
+}
+
+/** For requests whose body is optional: no body at all reads as an empty object. */
+export async function readOptionalJson(request: Request, maxBytes: number): Promise<Record<string, unknown>> {
+  const bytes = await readBytes(request, maxBytes);
+  return bytes.byteLength === 0 ? {} : parseJsonObject(request, bytes);
 }
 
 /** Returns a copy of the response with the given headers set. */

@@ -1,4 +1,4 @@
-// Builds the engine project's content from a private folder and, optionally,
+// Builds one shared project's content from a private folder and, optionally,
 // loads it into a running site. The content itself (task texts, reference
 // answers, hidden checks) is deliberately not part of this repository.
 //
@@ -6,8 +6,9 @@
 //   node scripts/load-content.mjs <folder> --target https://site --token <admin token>
 //
 // Folder layout:
-//   project.json                 { "pieces": ["id", ...], "showcase": { "title", "note" } }
-//   showcase.js                  the program that runs on the finished engine
+//   project.json                 { "id", "title", "summary", "pieces": ["id", ...], "showcase": { "title", "note" } }
+//   preamble.md                  the opening every piece's task shares: what the project is and its ground rules
+//   showcase.js                  the program that runs on the finished pieces ("showcase" and this file are optional)
 //   pieces/<id>/meta.json        { "title", "summary" }
 //   pieces/<id>/spec.md          what the agent is asked to write
 //   pieces/<id>/reference.js     a correct answer, used only to work out expected results
@@ -21,19 +22,7 @@ const flag = (name) => (flags.includes(name) ? flags[flags.indexOf(name) + 1] : 
 if (!folder) throw new Error("usage: node scripts/load-content.mjs <folder> [--out file] [--target url --token token]");
 const read = (...parts) => readFileSync(path.join(folder, ...parts), "utf8");
 
-const PREAMBLE = `You are writing one piece of a small 2D game engine. Other agents are writing the other pieces; you will not see their work and they will not see yours.
-
-Write plain JavaScript that calls define({ ... }) exactly once, passing the functions listed below under exactly these names.
-
-Rules for every function:
-- It is pure calculation: values in, a new value out.
-- Never change an argument. Return new objects and arrays.
-- Keep nothing between calls. No globals, no Date, no Math.random, no timers, no network.
-- Use only plain objects, arrays, numbers, booleans, strings and null.
-- Return objects with exactly the fields described and no others.
-- Coordinates: x grows to the right, y grows downward. Angles are in radians.
-
-`;
+const PREAMBLE = read("preamble.md").trim() + "\n\n";
 
 function deepFreeze(value) {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
@@ -97,8 +86,9 @@ async function buildPiece(id) {
 
 const project = JSON.parse(read("project.json"));
 const content = {
+  project: { id: project.id, title: project.title, summary: project.summary },
   pieces: await Promise.all(project.pieces.map(buildPiece)),
-  showcase: { ...project.showcase, code: read("showcase.js") },
+  ...(project.showcase ? { showcase: { ...project.showcase, code: read("showcase.js") } } : {}),
 };
 for (const piece of content.pieces) {
   console.log(`${piece.id}: ${piece.public_tests.length} examples, ${piece.hidden_tests.length} hidden checks, spec ${piece.spec.length} chars`);

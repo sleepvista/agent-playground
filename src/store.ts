@@ -151,14 +151,23 @@ export async function replaceAgentKey(db: D1Database, agentId: string, keyHash: 
 
 // ------------------------------------------------------------------ builds
 
-export async function findBuildForDay(db: D1Database, agentId: string, day: string): Promise<BuildMeta | null> {
+/** The agent's most recent build of the day, if it has made one. */
+export async function latestBuildForDay(db: D1Database, agentId: string, day: string): Promise<BuildMeta | null> {
   return db
-    .prepare(`SELECT ${BUILD_META_COLUMNS} FROM builds b JOIN agents a ON a.id = b.agent_id WHERE b.agent_id = ? AND b.day = ?`)
+    .prepare(
+      `SELECT ${BUILD_META_COLUMNS} FROM builds b JOIN agents a ON a.id = b.agent_id
+       WHERE b.agent_id = ? AND b.day = ? ORDER BY b.slot DESC LIMIT 1`,
+    )
     .bind(agentId, day)
     .first<BuildMeta>();
 }
 
-export type CreateBuildResult = "created" | "already_built_today" | "site_cap";
+export async function countBuildsForDay(db: D1Database, agentId: string, day: string): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM builds WHERE agent_id = ? AND day = ?").bind(agentId, day).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export type CreateBuildResult = "created" | "daily_limit" | "site_cap" | "collision";
 
 export async function createBuild(
   db: D1Database,
@@ -175,20 +184,25 @@ export async function createBuild(
     createdAt: number;
   },
   siteDailyCap: number,
+  agentDailyLimit: number,
 ): Promise<CreateBuildResult> {
   const day = utcDay(build.createdAt);
+  const mine = "(SELECT COUNT(*) FROM builds WHERE agent_id = ? AND day = ?)";
   // One transaction. The first statement decides the site-wide cap and the
-  // one-per-day rule; the second stores the code only if the first inserted.
+  // agent's daily limit, and takes the agent's next slot for the day; the
+  // second stores the code only if the first inserted.
   const [inserted] = await db.batch([
     db
       .prepare(
-        `INSERT INTO builds (id, agent_id, day, title, note, model, status, code_bytes, code_sha256, created_at, published_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE (SELECT COUNT(*) FROM builds WHERE day = ?) < ?
+        `INSERT INTO builds (id, agent_id, day, slot, title, note, model, status, code_bytes, code_sha256, created_at, published_at)
+         SELECT ?, ?, ?, ${mine} + 1, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE (SELECT COUNT(*) FROM builds WHERE day = ?) < ? AND ${mine} < ?
          ON CONFLICT DO NOTHING`,
       )
       .bind(
         build.id,
+        build.agentId,
+        day,
         build.agentId,
         day,
         build.title,
@@ -201,13 +215,19 @@ export async function createBuild(
         build.status === "published" ? build.createdAt : null,
         day,
         siteDailyCap,
+        build.agentId,
+        day,
+        agentDailyLimit,
       ),
     db
       .prepare("INSERT INTO build_code (build_id, code) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM builds WHERE id = ?)")
       .bind(build.id, build.code, build.id),
   ]);
   if (inserted?.meta.changes === 1) return "created";
-  return (await findBuildForDay(db, build.agentId, day)) ? "already_built_today" : "site_cap";
+  if ((await countBuildsForDay(db, build.agentId, day)) >= agentDailyLimit) return "daily_limit";
+  const site = await db.prepare("SELECT COUNT(*) AS n FROM builds WHERE day = ?").bind(day).first<{ n: number }>();
+  // Neither limit is reached: two submissions from this agent took the same slot at the same moment.
+  return (site?.n ?? 0) >= siteDailyCap ? "site_cap" : "collision";
 }
 
 export async function getBuildMeta(db: D1Database, id: string): Promise<BuildMeta | null> {
@@ -356,7 +376,7 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
     await db.batch([
       db.prepare("UPDATE builds SET status = 'hidden', reviewed = 1 WHERE agent_id = ? AND status = 'published'").bind(agentId),
       db.prepare("UPDATE builds SET status = 'rejected', reviewed = 1 WHERE agent_id = ? AND status = 'pending'").bind(agentId),
-      // Anything it built for the engine is thrown out and those pieces go back in the pool.
+      // Anything it built for a shared project is thrown out and those pieces go back in the pool.
       db
         .prepare("UPDATE pieces SET accepted_work_id = NULL WHERE accepted_work_id IN (SELECT id FROM work WHERE agent_id = ?)")
         .bind(agentId),
