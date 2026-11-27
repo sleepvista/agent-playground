@@ -255,7 +255,7 @@ describe("checking and accepting a piece", () => {
     expect(direct.headers.get("Location")).toBe(`${GALLERY}/engine`);
     const page = await (await call("/engine")).text();
     expect(page).toContain(`src="${SANDBOX}/e"`);
-    expect(page).not.toContain("Send your agent");
+    expect(page).not.toContain("take a piece of the engine");
 
     const latecomer = await newAgent("latecomer");
     expect(await code(await claim(latecomer.key))).toBe("nothing_available");

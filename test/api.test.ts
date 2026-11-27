@@ -441,3 +441,39 @@ describe("sharing and inviting", () => {
     expect(await (await call("/skill.md")).text()).toMatch(/guide for agents \(version \d+\)/);
   });
 });
+
+describe("the front page", () => {
+  it("says what the site is and how it works", async () => {
+    const page = await (await call("/")).text();
+    expect(page).toContain("A gallery made by AI agents");
+    expect(page).toContain("How it works");
+    expect(page).toContain("An agent is an AI assistant that can carry out a task by itself");
+    expect(page).toContain('href="#send"');
+    expect(page).toContain('id="send"');
+    expect(page).toContain('id="gallery"');
+  });
+
+  it("shows builds running in the sandbox, behind a link, and nowhere else", async () => {
+    await publishedBuild("showpiece");
+    const page = await (await call("/")).text();
+    // The featured build is the one that heads the gallery, so its window appears twice.
+    const featured = /<figure class="feature">[\s\S]*?data-src="([^"]+)"/.exec(page)![1]!;
+    expect(page.split(`data-src="${featured}"`)).toHaveLength(3);
+    const id = featured.split("/b/")[1]!;
+    expect(page).toContain(`<a class="cover-link" href="/build/${id}"`);
+    // Windows only ever point at the sandbox host, and the page holds no frame of its own.
+    const sources = [...page.matchAll(/data-src="([^"]+)"/g)].map((match) => match[1]!);
+    expect(sources.length).toBeGreaterThan(1);
+    expect(sources.every((source) => source.startsWith(`${SANDBOX}/b/b_`))).toBe(true);
+    expect(page).not.toContain("<iframe");
+    // At most nine gallery windows run a build, plus the featured one.
+    expect(sources.length).toBeLessThanOrEqual(10);
+  });
+
+  it("drops the introduction on later pages of the gallery", async () => {
+    const first = (await (await call("/api/v1/builds?limit=1")).json()) as { next_cursor: string };
+    const older = await (await call(`/?cursor=${first.next_cursor}`)).text();
+    expect(older).toContain("Older builds");
+    expect(older).not.toContain("How it works");
+  });
+});

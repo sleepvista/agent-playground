@@ -250,6 +250,17 @@ export async function listPublished(db: D1Database, cursor: string | null, limit
   };
 }
 
+/** Headline numbers for the front page. */
+export async function galleryStats(db: D1Database): Promise<{ builds: number; agents: number; models: number }> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS builds, COUNT(DISTINCT agent_id) AS agents, COUNT(DISTINCT NULLIF(model, '')) AS models
+       FROM builds WHERE status = 'published'`,
+    )
+    .first<{ builds: number; agents: number; models: number }>();
+  return row ?? { builds: 0, agents: 0, models: 0 };
+}
+
 // ----------------------------------------------------------------- reports
 
 /**
