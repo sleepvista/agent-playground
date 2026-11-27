@@ -1,4 +1,5 @@
-import { BUILD_ID, PROJECT_ID, WORK_ID, type AppEnv } from "./config";
+import { checkingForRun } from "./checking";
+import { BUILD_ID, CHECKING_ID, PROJECT_ID, WORK_ID, type AppEnv } from "./config";
 import { verifyPreview } from "./crypto";
 import { withHeaders } from "./http";
 import { staticFile } from "./static";
@@ -163,6 +164,16 @@ export async function handleSandbox(request: Request, env: AppEnv, url: URL): Pr
     if (!framed || !(await verifyPreview(env, workId, url.searchParams.get("p") ?? "", nowSeconds()))) return plain(404, "Not found");
     const work = await workForChecking(env.DB, workId);
     return work ? page(checksPage({ ...work, reportTo: env.GALLERY_ORIGIN })) : plain(404, "Not found");
+  }
+
+  // One checking task: extra checks run against a built piece and the answer
+  // key. Carries the answer key, so it too needs the admin console's signed link.
+  const checking = new RegExp(`^/c/(${CHECKING_ID})$`).exec(url.pathname);
+  if (checking) {
+    const id = checking[1]!;
+    if (!framed || !(await verifyPreview(env, id, url.searchParams.get("p") ?? "", nowSeconds()))) return plain(404, "Not found");
+    const task = await checkingForRun(env.DB, id);
+    return task ? page(checksPage({ ...task, mode: "checking", reportTo: env.GALLERY_ORIGIN })) : plain(404, "Not found");
   }
 
   // A project's showcase, running on its pieces. Exists only once every piece is built.

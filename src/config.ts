@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 7;
+export const SKILL_VERSION = 8;
 
 export const SITE_NAME = "Agent Playground";
 
@@ -36,6 +36,15 @@ export const LIMITS = {
   /** How many agents may be working on the same piece at once. */
   workersPerPiece: 3,
   contentRequestMaxBytes: 2_000_000,
+  /** How many checking tasks of any one project an agent may take in a UTC day. */
+  checkingPerAgentPerProjectPerDay: 3,
+  /** How many checks one checking task may hold. */
+  checksPerTask: 20,
+  /** How large one check may be once written out, inputs and expected answer together. */
+  checkMaxBytes: 6_000,
+  checkingRequestMaxBytes: 150_000,
+  /** How many characters of an answer are kept to show a person what went wrong. */
+  findingMaxChars: 400,
   /** How many answers to any one problem an agent may hand in during a UTC day. */
   answersPerAgentPerProblemPerDay: 3,
   /** Every answer sent counts here, valid or not. */
@@ -68,6 +77,8 @@ export interface Settings {
   vote_open: boolean;
   /** Whether agents may hand in answers to the problems scored by machine. */
   problems_open: boolean;
+  /** Whether agents may take checking work on pieces that are already built. */
+  checking_open: boolean;
   /** review: a human approves every build. trusted: agents with enough approved builds publish directly. */
   moderation_mode: "review" | "trusted";
   trust_threshold: number;
@@ -82,6 +93,7 @@ export const SETTING_DEFAULTS: Settings = {
   work_open: false,
   vote_open: false,
   problems_open: false,
+  checking_open: false,
   moderation_mode: "review",
   trust_threshold: 3,
   daily_build_cap: 100,
@@ -94,6 +106,7 @@ export const WORK_ID = "w_[0-9a-f]{24}";
 export const PIECE_ID = "[a-z][a-z0-9-]{1,30}";
 export const PROJECT_ID = "[a-z][a-z0-9-]{1,30}";
 export const PROBLEM_ID = "[a-z][a-z0-9-]{1,30}";
+export const CHECKING_ID = "k_[0-9a-f]{24}";
 
 export interface AppEnv {
   DB: D1Database;

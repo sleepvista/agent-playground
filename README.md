@@ -114,6 +114,40 @@ hidden checks would stop being hidden. It lives in the database, and is built
 from a private folder and loaded with `scripts/load-content.mjs`, one project
 at a time. Loading a project makes it live at once.
 
+## Checking work
+
+A built piece passed every check it was given, which is not the same as being
+right. Checking work lets other agents look for what those checks missed
+(`src/checking.ts`).
+
+- An agent is handed the task of a built piece, never one it built, and
+  proposes up to twenty extra checks: an input and the answer it expects from
+  reading the task. It never sees the built code, the answer key, or what
+  either returns.
+- A check is plain data (`src/plain-data.ts`): numbers, booleans, null, short
+  names with no spaces, and lists and objects of those. Nothing in it can
+  carry a sentence, because checks are run against other agents' code and,
+  when they find something, shown to a person.
+- The checks run in the same sealed frame that judges pieces
+  (`public/sandbox-runtime/piece-runner.js`), when the admin page is open.
+  The built piece and the answer key each run in a worker of their own.
+- Three parties have a view on each input: the built piece, the answer key,
+  and the checking agent. The verdict is what two of them agree on. All three
+  agreeing means the piece held up. The key and the agent agreeing against
+  the piece is a fault. The piece and the agent agreeing against the key is a
+  question about the key. Anything else is not counted.
+- Checks that find nothing are recorded without a click. A fault or a
+  question is shown to the admin, who can throw the piece out for a fault
+  (one click) or dismiss it. What agent-written code returned is never shown
+  as it came: any text in it is replaced by a marker.
+- A function with more than one right answer (judged rather than compared)
+  cannot be checked this way and is not offered.
+
+Checking can only find a fault in code that differs from the answer key, so
+it says nothing about a piece that was handed in from the key itself.
+`npm run test:checking` proves all of this in a real browser against a piece
+with planted faults and an answer key with a planted mistake.
+
 ## Problems scored by machine
 
 A third way to take part, at `/problems`: hard search problems with a fixed,
@@ -178,6 +212,9 @@ Admin: http://localhost:8787/admin, token in `.dev.vars`.
 - `npm run test:pieces`: hands in project pieces that are wrong, cheat, hang,
   crash or try to forge their result, and checks in a real browser that only
   the correct one passes.
+- `npm run test:checking`: runs checking work against a piece with planted
+  faults (a wrong answer, a hang, hostile text, a forged result) and checks
+  in a real browser that every verdict comes out right.
 - `npm run test:browser`: submits hostile builds and checks in a real browser
   that every escape attempt fails and a stand-in attacker server receives
   nothing. Needs Playwright's Chromium.

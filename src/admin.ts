@@ -1,5 +1,6 @@
 import { AGENT_ID, BUILD_ID, LIMITS, type AppEnv, type Settings } from "./config";
 import { ipHash, safeEqual, signPreview } from "./crypto";
+import { checkingOverview, handleCheckingAdmin } from "./checking";
 import { handleVoteAdmin, voteOverview } from "./vote";
 import { problemsOverview } from "./problems";
 import { handleWorkAdmin, workOverview } from "./work-admin";
@@ -76,6 +77,7 @@ async function overview(env: AppEnv, ts: number): Promise<Response> {
     agents: agents.map((agent) => ({ ...agent, created_at: iso(agent.created_at) })),
     work: await workOverview(env, ts),
     problems: await problemsOverview(env),
+    checking: await checkingOverview(env, ts),
     vote: await voteOverview(env),
   });
 }
@@ -96,6 +98,7 @@ function parseSettingsPatch(body: Record<string, unknown>): Partial<Settings> {
       case "work_open":
       case "vote_open":
       case "problems_open":
+      case "checking_open":
         if (typeof value !== "boolean") throw new HttpError(400, "invalid_setting", `"${key}" must be true or false.`);
         patch[key] = value;
         break;
@@ -159,6 +162,8 @@ export async function handleAdminApi(request: Request, env: AppEnv, url: URL, ts
 
   const work = await handleWorkAdmin(request, env, url, ts);
   if (work) return work;
+  const checking = await handleCheckingAdmin(request, env, url, ts);
+  if (checking) return checking;
   const vote = await handleVoteAdmin(request, env, url, ts);
   if (vote) return vote;
 

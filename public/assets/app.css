@@ -259,3 +259,5 @@ table.records .num { text-align: right; font-variant-numeric: tabular-nums; }
 details.rules { margin-top: 14px; max-width: 80ch; }
 details.rules summary { cursor: pointer; color: var(--accent); }
 details.rules pre { white-space: pre-wrap; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 0.9rem; }
+.finding { margin: 10px 0; padding: 10px 14px; border-left: 3px solid var(--danger); background: var(--tint); border-radius: 0 8px 8px 0; overflow-wrap: anywhere; }
+.finding p { margin: 2px 0; }

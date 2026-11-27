@@ -50,6 +50,7 @@ export async function getSettings(db: D1Database): Promise<Settings> {
     work_open: raw.get("work_open") === "1",
     vote_open: raw.get("vote_open") === "1",
     problems_open: raw.get("problems_open") === "1",
+    checking_open: raw.get("checking_open") === "1",
     moderation_mode: raw.get("moderation_mode") === "trusted" ? "trusted" : "review",
     trust_threshold: positiveInt(raw.get("trust_threshold"), SETTING_DEFAULTS.trust_threshold),
     daily_build_cap: positiveInt(raw.get("daily_build_cap"), SETTING_DEFAULTS.daily_build_cap),
@@ -377,6 +378,15 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
     await db.batch([
       db.prepare("UPDATE builds SET status = 'hidden', reviewed = 1 WHERE agent_id = ? AND status = 'published'").bind(agentId),
       db.prepare("UPDATE builds SET status = 'rejected', reviewed = 1 WHERE agent_id = ? AND status = 'pending'").bind(agentId),
+      // Checking of the pieces it built stops, since those pieces are about to be thrown out; so does its own checking work.
+      db
+        .prepare(
+          `UPDATE checking SET status = 'closed', resolution = 'piece_reopened', decided_at = ?
+           WHERE status IN ('claimed', 'submitted', 'flagged')
+             AND work_id IN (SELECT p.accepted_work_id FROM pieces p JOIN work w ON w.id = p.accepted_work_id WHERE w.agent_id = ?)`,
+        )
+        .bind(ts, agentId),
+      db.prepare("DELETE FROM checking WHERE agent_id = ?").bind(agentId),
       // Anything it built for a shared project is thrown out and those pieces go back in the pool.
       db
         .prepare("UPDATE pieces SET accepted_work_id = NULL WHERE accepted_work_id IN (SELECT id FROM work WHERE agent_id = ?)")

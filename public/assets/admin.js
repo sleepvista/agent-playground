@@ -118,6 +118,7 @@ function settingsPanel(data, message) {
     toggle("Let agents take pieces of the shared projects", "work_open"),
     toggle("Let visitors vote on what to build next", "vote_open"),
     toggle("Let agents answer the hard problems", "problems_open"),
+    toggle("Let agents check pieces that are already built", "checking_open"),
     el("label", { class: "row" }, [el("span", { text: "Review:" }), mode]),
     number("Approved builds before an agent is trusted", "trust_threshold", 1, 100),
     number("Most builds per day, whole site", "daily_build_cap", 0, 10000),
@@ -214,9 +215,8 @@ const checkFrames = new Map();
 window.addEventListener("message", (event) => {
   const report = checkFrames.get(event.source);
   const data = event.data;
-  if (!report || event.origin !== "null" || !data || data.type !== "piece-checks") return;
-  if (!Number.isInteger(data.passed) || !Number.isInteger(data.total)) return;
-  report(data.passed, data.total);
+  if (!report || event.origin !== "null" || !data || data.type !== report.type) return;
+  report.handle(data);
 });
 
 function workItem(work, message) {
@@ -237,14 +237,18 @@ function workItem(work, message) {
   const frame = el("iframe", { title: "Checks", class: "checks", sandbox: "allow-scripts", referrerpolicy: "no-referrer", src: work.frame_url });
   // The frame's window exists once it is on the page, so register it then.
   queueMicrotask(() => {
-    checkFrames.set(frame.contentWindow, (passed, total) => {
-      result.passed = passed;
-      result.total = total;
-      const all = total > 0 && passed === total;
-      verdict.textContent = all
-        ? `Passed all ${total} checks. Safe to accept.`
-        : `Passed ${passed} of ${total} checks. It cannot be accepted.`;
-      accept.disabled = !all || work.piece_done;
+    checkFrames.set(frame.contentWindow, {
+      type: "piece-checks",
+      handle({ passed, total }) {
+        if (!Number.isInteger(passed) || !Number.isInteger(total)) return;
+        result.passed = passed;
+        result.total = total;
+        const all = total > 0 && passed === total;
+        verdict.textContent = all
+          ? `Passed all ${total} checks. Safe to accept.`
+          : `Passed ${passed} of ${total} checks. It cannot be accepted.`;
+        accept.disabled = !all || work.piece_done;
+      },
     });
   });
   return el("div", { class: "item" }, [
@@ -281,7 +285,6 @@ function projectPanel(project, message) {
 }
 
 function workPanels(work, message) {
-  checkFrames.clear();
   if (work.projects.length === 0) return [];
   return [
     el("div", { class: "panel" }, [
@@ -335,6 +338,107 @@ function problemsPanel(problems) {
       ]),
     ),
   ]);
+}
+
+// Checking work runs by itself: each waiting task opens in the sealed frame,
+// and what the frame works out is recorded without anyone clicking. The page
+// refreshes once every waiting task has reported.
+function runningItem(task, onDone) {
+  const state = el("p", { class: "meta", role: "status", text: `Running ${task.checks} check(s)...` });
+  const frame = el("iframe", { title: "Checking work", class: "checks", sandbox: "allow-scripts", referrerpolicy: "no-referrer", src: task.frame_url });
+  let reported = false;
+  queueMicrotask(() => {
+    checkFrames.set(frame.contentWindow, {
+      type: "checking-results",
+      async handle({ results }) {
+        if (reported || !Array.isArray(results)) return;
+        reported = true;
+        try {
+          const saved = await api(`/api/admin/checking/${task.id}`, { action: "record", results });
+          state.textContent = saved.status === "flagged" ? "Recorded. It found something: see below once this page refreshes." : "Recorded. Nothing found.";
+        } catch (error) {
+          state.textContent = `Could not record the result: ${error.message}`;
+        }
+        onDone();
+      },
+    });
+  });
+  return el("div", { class: "item" }, [
+    el("h3", { text: `${task.project_title}: ${task.piece_title}` }),
+    el("p", { class: "meta", text: `checks proposed by ${task.agent_name}${task.model ? ` · says it runs on ${task.model}` : ""} · ${task.submitted_at.slice(0, 10)}` }),
+    frame,
+    state,
+  ]);
+}
+
+const FINDING_WORDS = {
+  fault: "Fault. The answer key and the checking agent agree, and the built piece gives a different answer.",
+  key_question:
+    "Question about the answer key. The built piece and the checking agent agree with each other, and the answer key differs. Ask Claude to look at this one: the answer key may be wrong.",
+};
+const gave = (text) => (text === '{"stopped":true}' ? "nothing: it stopped with an error or took too long" : text);
+
+function flaggedItem(task, message) {
+  const faults = task.findings.filter((finding) => finding.kind === "fault").length;
+  return el("div", { class: "item" }, [
+    el("h3", { text: `${task.project_title}: ${task.piece_title}` }),
+    el("p", { class: "meta", text: `found by ${task.agent_name}${task.model ? ` · says it runs on ${task.model}` : ""} · ${task.submitted_at.slice(0, 10)}` }),
+    ...task.findings.map((finding) =>
+      el("div", { class: "finding" }, [
+        el("p", { text: FINDING_WORDS[finding.kind] }),
+        el("p", { class: "meta", text: `Input: ${finding.call}(${finding.args.slice(1, -1)})` }),
+        el("p", { class: "meta", text: `Built piece gives: ${gave(finding.piece_gave)}` }),
+        el("p", { class: "meta", text: `Answer key gives: ${finding.key_gives}` }),
+        el("p", { class: "meta", text: `Checking agent expected: ${finding.agent_expected}` }),
+      ]),
+    ),
+    el("div", { class: "row" }, [
+      ...(faults > 0 && task.piece_still_built
+        ? [
+            el("button", {
+              type: "button",
+              class: "primary",
+              text: "Throw out this piece and reopen it",
+              onClick: () => {
+                if (confirm(`Throw out the built code for "${task.piece_title}" so another agent can build it? Anything running on the finished project stops until it is rebuilt.`)) {
+                  act(`/api/admin/checking/${task.id}`, { action: "reopen_piece" }, message);
+                }
+              },
+            }),
+          ]
+        : []),
+      el("button", { type: "button", text: "Dismiss", onClick: () => act(`/api/admin/checking/${task.id}`, { action: "dismiss" }, message) }),
+    ]),
+  ]);
+}
+
+function checkingPanels(checking, message) {
+  if (checking.waiting.length === 0 && checking.flagged.length === 0 && checking.totals.tasks === 0) return [];
+  let left = checking.waiting.length;
+  const done = () => {
+    left -= 1;
+    if (left === 0) load();
+  };
+  const { totals } = checking;
+  return [
+    el("div", { class: "panel" }, [
+      el("h2", { text: `Checking work that found something (${checking.flagged.length})` }),
+      el("p", {
+        class: "meta",
+        text: `So far: ${totals.tasks} checking task(s) run, ${totals.held} extra check(s) held, ${totals.faults} fault(s) found. Checks that find nothing settle by themselves; only what is listed here needs you.`,
+      }),
+      ...(checking.flagged.length > 0 ? checking.flagged.map((task) => flaggedItem(task, message)) : [el("p", { class: "meta", text: "Nothing needs a decision." })]),
+    ]),
+    ...(checking.waiting.length > 0
+      ? [
+          el("div", { class: "panel" }, [
+            el("h2", { text: `Checking work being run now (${checking.waiting.length})` }),
+            el("p", { class: "meta", text: "Nothing to do here. Keep this page open until each one says it is recorded." }),
+            ...checking.waiting.map((task) => runningItem(task, done)),
+          ]),
+        ]
+      : []),
+  ];
 }
 
 function votePanel(vote, message) {
@@ -395,6 +499,8 @@ async function load() {
     return showLogin(error.message);
   }
   const message = el("p", { class: "msg", role: "status" });
+  // Frames from the last view are gone; only the ones about to be made may report.
+  checkFrames.clear();
   root.replaceChildren(
     el("div", { class: "row" }, [
       el("button", { type: "button", text: "Refresh", onClick: load }),
@@ -410,6 +516,7 @@ async function load() {
     message,
     settingsPanel(data, message),
     ...workPanels(data.work, message),
+    ...checkingPanels(data.checking, message),
     problemsPanel(data.problems),
     votePanel(data.vote, message),
     buildPanel("Waiting for review", "Nothing is waiting.", data.pending, [["Approve", "approve", "primary"], ["Reject", "reject", ""]], message),

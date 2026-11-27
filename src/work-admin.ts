@@ -99,15 +99,44 @@ async function decide(env: AppEnv, workId: string, body: Record<string, unknown>
   return json({ ok: true });
 }
 
-async function reopen(env: AppEnv, pieceId: string, ts: number): Promise<Response> {
-  const piece = await env.DB.prepare("SELECT accepted_work_id FROM pieces WHERE id = ?").bind(pieceId).first<{ accepted_work_id: string | null }>();
-  if (!piece?.accepted_work_id) throw new HttpError(409, "wrong_state", "That piece is not built.");
-  await env.DB.batch([
-    env.DB.prepare("UPDATE work SET status = 'rejected', decided_at = ? WHERE id = ?").bind(ts, piece.accepted_work_id),
-    env.DB.prepare("UPDATE pieces SET accepted_work_id = NULL, updated_at = ? WHERE id = ?").bind(ts, pieceId),
+/**
+ * Throws out a piece's accepted code so another agent can build it. Any
+ * checking of that code stops with it. Returns false if the piece is not built.
+ */
+export async function reopenPiece(db: D1Database, pieceId: string, why: string, ts: number): Promise<boolean> {
+  const piece = await db.prepare("SELECT accepted_work_id FROM pieces WHERE id = ?").bind(pieceId).first<{ accepted_work_id: string | null }>();
+  if (!piece?.accepted_work_id) return false;
+  await db.batch([
+    db.prepare("UPDATE work SET status = 'rejected', decided_at = ? WHERE id = ?").bind(ts, piece.accepted_work_id),
+    db.prepare("UPDATE pieces SET accepted_work_id = NULL, updated_at = ? WHERE id = ?").bind(ts, pieceId),
+    db
+      .prepare(
+        `UPDATE checking SET status = 'closed', resolution = 'piece_reopened', decided_at = ?
+         WHERE work_id = ? AND status IN ('claimed', 'submitted', 'flagged')`,
+      )
+      .bind(ts, piece.accepted_work_id),
   ]);
-  await audit(env.DB, "admin", "piece_reopen", pieceId, piece.accepted_work_id, ts);
+  await audit(db, "admin", "piece_reopen", pieceId, `${piece.accepted_work_id} ${why}`, ts);
+  return true;
+}
+
+async function reopen(env: AppEnv, pieceId: string, ts: number): Promise<Response> {
+  if (!(await reopenPiece(env.DB, pieceId, "by_hand", ts))) throw new HttpError(409, "wrong_state", "That piece is not built.");
   return json({ ok: true });
+}
+
+/**
+ * Which of a piece's functions can be given extra checks later, each with how
+ * close two numbers must be to count as equal. A function whose answers are
+ * judged rather than compared has more than one right answer, so it is left out.
+ */
+function checkCalls(tests: TestCase[]): Record<string, number> {
+  const calls = new Map<string, { tol: number; judged: boolean }>();
+  for (const test of tests) {
+    const entry = calls.get(test.call) ?? { tol: 1e-9, judged: false };
+    calls.set(test.call, { tol: Math.max(entry.tol, test.tol ?? 1e-9), judged: entry.judged || test.judge !== undefined });
+  }
+  return Object.fromEntries([...calls].filter(([, entry]) => !entry.judged).map(([name, entry]) => [name, entry.tol]));
 }
 
 function text(value: unknown, key: string, max: number): string {
@@ -177,14 +206,16 @@ async function loadContent(env: AppEnv, body: Record<string, unknown>, ts: numbe
   pieces.forEach((piece, position) => {
     const pieceId = id(piece.id, PIECE_ID, "piece");
     pieceIds.push(pieceId);
+    const shown = tests(piece.public_tests, "public_tests");
+    const hidden = tests(piece.hidden_tests, "hidden_tests");
     statements.push(
       env.DB
         .prepare(
-          `INSERT INTO pieces (id, project_id, position, title, summary, spec, public_tests, hidden_tests, reference_code, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO pieces (id, project_id, position, title, summary, spec, public_tests, hidden_tests, check_calls, reference_code, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO UPDATE SET position = excluded.position, title = excluded.title, summary = excluded.summary,
              spec = excluded.spec, public_tests = excluded.public_tests, hidden_tests = excluded.hidden_tests,
-             reference_code = excluded.reference_code, updated_at = excluded.updated_at`,
+             check_calls = excluded.check_calls, reference_code = excluded.reference_code, updated_at = excluded.updated_at`,
         )
         .bind(
           pieceId,
@@ -193,8 +224,9 @@ async function loadContent(env: AppEnv, body: Record<string, unknown>, ts: numbe
           text(piece.title, "title", 80),
           text(piece.summary, "summary", 200),
           text(piece.spec, "spec", 20_000),
-          JSON.stringify(tests(piece.public_tests, "public_tests")),
-          JSON.stringify(tests(piece.hidden_tests, "hidden_tests")),
+          JSON.stringify(shown),
+          JSON.stringify(hidden),
+          JSON.stringify(checkCalls([...shown, ...hidden])),
           typeof piece.reference_code === "string" ? piece.reference_code : "",
           ts,
         ),

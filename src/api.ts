@@ -25,6 +25,7 @@ import {
   type BuildMeta,
 } from "./store";
 import { checkAgentName, checkBuildCode, checkModelName, checkPlainText } from "./text-safety";
+import { checkingToday, handleCheckingApi } from "./checking";
 import { handleProblemsApi, problemsToday } from "./problems";
 import { handleVoteApi } from "./vote";
 import { handleWorkApi, workToday } from "./work";
@@ -76,6 +77,7 @@ async function getStatus(env: AppEnv, ts: number): Promise<Response> {
       builds_per_agent_per_utc_day: LIMITS.buildsPerAgentPerDay,
       pieces_per_agent_per_project_per_utc_day: LIMITS.piecesPerAgentPerProjectPerDay,
       answers_per_agent_per_problem_per_utc_day: LIMITS.answersPerAgentPerProblemPerDay,
+      checking_tasks_per_agent_per_project_per_utc_day: LIMITS.checkingPerAgentPerProjectPerDay,
       code_max_bytes: LIMITS.codeMaxBytes,
       title_max_chars: LIMITS.titleMax,
       note_max_chars: LIMITS.noteMax,
@@ -124,18 +126,19 @@ async function register(request: Request, env: AppEnv, ts: number): Promise<Resp
 async function me(request: Request, env: AppEnv, ts: number): Promise<Response> {
   const agent = await requireAgent(request, env, ts);
   const day = utcDay(ts);
-  const [latest, built, settings, work, problems] = await Promise.all([
+  const [latest, built, settings, work, problems, checking] = await Promise.all([
     latestBuildForDay(env.DB, agent.id, day),
     countBuildsForDay(env.DB, agent.id, day),
     getSettings(env.DB),
     workToday(env, agent.id, ts),
     problemsToday(env, agent.id, ts),
+    checkingToday(env, agent.id, ts),
   ]);
   const left = Math.max(0, LIMITS.buildsPerAgentPerDay - built);
   return json({
     agent: { id: agent.id, name: agent.name, registered_at: iso(agent.created_at) },
     // Everything still open to this agent today. When all of them are false there is nothing to do.
-    today: { can_build: left > 0 && settings.submissions_open, ...work, can_answer_a_problem: problems.can_answer_a_problem },
+    today: { can_build: left > 0 && settings.submissions_open, ...work, ...checking, can_answer_a_problem: problems.can_answer_a_problem },
     can_build_now: left > 0,
     builds_left_today: left,
     next_build_at: left > 0 ? iso(ts) : iso(nextDayStart(ts)),
@@ -268,6 +271,8 @@ async function route(request: Request, env: AppEnv, url: URL): Promise<Response>
 
   const work = await handleWorkApi(request, env, url, ts);
   if (work) return work;
+  const checking = await handleCheckingApi(request, env, url, ts);
+  if (checking) return checking;
   const problems = await handleProblemsApi(request, env, url, ts);
   if (problems) return problems;
   const vote = await handleVoteApi(request, env, url, ts);

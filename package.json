@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:browser": "node test/browser/containment.mjs",
     "test:pieces": "node test/browser/pieces.mjs",
+    "test:checking": "node test/browser/checking.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "check": "npm run typecheck && npm test",
     "db:migrate": "wrangler d1 migrations apply DB --env gallery --remote",

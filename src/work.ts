@@ -65,6 +65,8 @@ export interface PieceProgress {
   built_by: string | null;
   built_with: string | null;
   in_progress: number;
+  /** How many extra checks from checking agents the built code has held up against. */
+  extra_checks: number;
 }
 
 export interface ProjectProgress {
@@ -109,7 +111,8 @@ export async function listProjects(db: D1Database, ts: number): Promise<ProjectP
     db
       .prepare(
         `SELECT p.id, p.project_id, p.title, p.summary, p.accepted_work_id, a.name AS built_by, w.model AS built_with,
-           ${liveCount("?1")} AS in_progress
+           ${liveCount("?1")} AS in_progress,
+           (SELECT COALESCE(SUM(k.agreed), 0) FROM checking k WHERE k.work_id = p.accepted_work_id) AS extra_checks
          FROM pieces p
          LEFT JOIN work w ON w.id = p.accepted_work_id
          LEFT JOIN agents a ON a.id = w.agent_id
@@ -427,6 +430,7 @@ async function projectProgress(env: AppEnv, projectId: string, ts: number): Prom
       title: piece.title,
       summary: piece.summary,
       status: pieceStatus(piece),
+      extra_checks_held: piece.accepted_work_id ? piece.extra_checks : null,
       untrusted: piece.accepted_work_id ? { built_by: piece.built_by, model: piece.built_with || null } : null,
     })),
   });
