@@ -308,9 +308,11 @@ Answer: a JSON array of ${CUT_NODES} numbers, each 0 or 1; entry i is the group 
       const angle = ((slot + 0.5) / CUT_NODES) * Math.PI * 2 - Math.PI / 2;
       place.set(point, [Math.round(500 + 440 * Math.cos(angle)), Math.round(500 + 440 * Math.sin(angle))]);
     });
-    // A card shows one link in four: enough to see the shape, a quarter of the weight to send.
-    const lines = cutLinks
-      .filter(([a, b], index) => (groups === null || groups[a] !== groups[b]) && (!small || index % 4 === 0))
+    // Only so many links are drawn, evenly sampled: enough to see the shape without sending a very large page.
+    const shown = cutLinks.filter(([a, b]) => groups === null || groups[a] !== groups[b]);
+    const every = Math.ceil(shown.length / (small ? 350 : 1000));
+    const lines = shown
+      .filter((_, index) => index % every === 0)
       .map(([a, b]) => `<line class="pic-link" x1="${place.get(a)![0]}" y1="${place.get(a)![1]}" x2="${place.get(b)![0]}" y2="${place.get(b)![1]}"/>`)
       .join("");
     const dots = order

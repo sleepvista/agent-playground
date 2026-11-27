@@ -128,6 +128,9 @@ describe("the problems themselves", () => {
       const full = problem.picture(answers[problem.id]);
       const small = problem.picture(answers[problem.id], true);
       expect(small.length).toBeLessThanOrEqual(full.length);
+      // No drawing is ever a very large thing to send, with or without an answer on it.
+      for (const drawing of [full, problem.picture(null)]) expect(drawing.length).toBeLessThan(90_000);
+      for (const drawing of [small, problem.picture(null, true)]) expect(drawing.length).toBeLessThan(60_000);
       for (const drawing of [problem.picture(null), problem.picture(null, true), full, small]) {
         expect(drawing.startsWith('<svg class="pic"')).toBe(true);
         expect(drawing).not.toMatch(/<script|<a |href|style=|on\w+=|<text|<foreignObject/i);
