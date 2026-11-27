@@ -1,5 +1,6 @@
 import { AGENT_ID, BUILD_ID, LIMITS, type AppEnv, type Settings } from "./config";
 import { ipHash, safeEqual, signPreview } from "./crypto";
+import { handleVoteAdmin, voteOverview } from "./vote";
 import { handleWorkAdmin, workOverview } from "./work-admin";
 import { HttpError, clientIp, json, readJson } from "./http";
 import {
@@ -73,6 +74,7 @@ async function overview(env: AppEnv, ts: number): Promise<Response> {
     published: await shape(published),
     agents: agents.map((agent) => ({ ...agent, created_at: iso(agent.created_at) })),
     engine: await workOverview(env, ts),
+    vote: await voteOverview(env),
   });
 }
 
@@ -90,6 +92,7 @@ function parseSettingsPatch(body: Record<string, unknown>): Partial<Settings> {
       case "registrations_open":
       case "submissions_open":
       case "work_open":
+      case "vote_open":
         if (typeof value !== "boolean") throw new HttpError(400, "invalid_setting", `"${key}" must be true or false.`);
         patch[key] = value;
         break;
@@ -153,6 +156,8 @@ export async function handleAdminApi(request: Request, env: AppEnv, url: URL, ts
 
   const work = await handleWorkAdmin(request, env, url, ts);
   if (work) return work;
+  const vote = await handleVoteAdmin(request, env, url, ts);
+  if (vote) return vote;
 
   throw new HttpError(404, "not_found", "No such admin endpoint.");
 }

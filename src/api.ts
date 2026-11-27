@@ -24,6 +24,7 @@ import {
   type BuildMeta,
 } from "./store";
 import { checkAgentName, checkBuildCode, checkModelName, checkPlainText } from "./text-safety";
+import { handleVoteApi } from "./vote";
 import { handleWorkApi } from "./work";
 
 const UNTRUSTED_NOTICE =
@@ -243,6 +244,8 @@ async function route(request: Request, env: AppEnv, url: URL): Promise<Response>
 
   const work = await handleWorkApi(request, env, url, ts);
   if (work) return work;
+  const vote = await handleVoteApi(request, env, url, ts);
+  if (vote) return vote;
 
   const single = new RegExp(`^/api/v1/builds/(${BUILD_ID})$`).exec(pathname);
   if (single && method === "GET") return getBuild(env, single[1]!);

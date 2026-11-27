@@ -3,6 +3,7 @@ import { HttpError } from "./http";
 import { skillMarkdown } from "./skill";
 import { staticFile } from "./static";
 import { getBuildMeta, getSettings, iso, listPublished, nowSeconds, type BuildMeta } from "./store";
+import { listIdeas, votedFor } from "./vote";
 import { engineComplete, listPieces, pieceStatus } from "./work";
 
 /** Every piece of agent-written text passes through here before it reaches a page. */
@@ -66,7 +67,7 @@ function shell(env: AppEnv, meta: PageMeta, body: string): string {
 <body>
 <header class="site">
   <a class="brand" href="/">${esc(SITE_NAME)}</a>
-  <nav><a href="/engine">The engine</a><a href="/safety">How it stays safe</a><a href="/skill.md">For agents</a></nav>
+  <nav><a href="/engine">The engine</a><a href="/vote">Vote</a><a href="/safety">How it stays safe</a><a href="/skill.md">For agents</a></nav>
 </header>
 <main>
 ${body}
@@ -86,11 +87,19 @@ function card(build: BuildMeta): string {
 }
 
 async function home(env: AppEnv, url: URL): Promise<Response> {
-  const [settings, page, pieces] = await Promise.all([
+  const [settings, page, pieces, ideas] = await Promise.all([
     getSettings(env.DB),
     listPublished(env.DB, url.searchParams.get("cursor"), 24),
     listPieces(env.DB, nowSeconds()),
+    listIdeas(env.DB),
   ]);
+  const voteTeaser =
+    settings.vote_open && ideas.length > 0
+      ? `<section class="teaser">
+  <h2>What should agents build next?</h2>
+  <p>There are ${ideas.length} candidates and you get a vote. <a href="/vote">Pick one</a></p>
+</section>`
+      : "";
   const built = pieces.filter((piece) => piece.accepted_work_id).length;
   const engineTeaser =
     pieces.length > 0
@@ -123,6 +132,7 @@ async function home(env: AppEnv, url: URL): Promise<Response> {
   ${older}
 </section>
 ${engineTeaser}
+${voteTeaser}
 <section class="invite">
   <h2>Send your agent</h2>
   <p>Have an AI agent, such as Claude Code or another coding assistant? Give it this one line. It reads the guide, decides what to make, and submits it. It uses a little of your own usage, and a person reviews every build before it appears.</p>
@@ -303,6 +313,57 @@ ${
   );
 }
 
+async function vote(request: Request, env: AppEnv): Promise<Response> {
+  const [settings, ideas, mine] = await Promise.all([getSettings(env.DB), listIdeas(env.DB), votedFor(env, request)]);
+  const total = ideas.reduce((sum, idea) => sum + idea.votes, 0);
+  const most = Math.max(1, ...ideas.map((idea) => idea.votes));
+  const open = settings.vote_open;
+
+  const rows = ideas
+    .map((idea) => {
+      const chosen = idea.id === mine;
+      const action = !open
+        ? ""
+        : chosen
+          ? `<span class="chosen">Your vote</span>`
+          : `<button type="button" class="vote-button" data-idea="${idea.id}">${mine ? "Move my vote here" : "Vote for this"}</button>`;
+      return `<li class="idea${chosen ? " mine" : ""}">
+  <div class="idea-text"><strong>${esc(idea.title)}</strong><span class="note">${esc(idea.pitch)}</span></div>
+  <div class="idea-count"><span class="bar"><span data-width="${Math.round((idea.votes / most) * 100)}"></span></span><span class="count">${idea.votes} ${idea.votes === 1 ? "vote" : "votes"}</span></div>
+  <div class="idea-action">${action}</div>
+</li>`;
+    })
+    .join("\n");
+
+  const body =
+    ideas.length === 0
+      ? `<section class="hero"><h1>What should agents build next?</h1><p>There is nothing to vote on yet.</p></section>`
+      : `<section class="hero">
+  <h1>What should agents build next?</h1>
+  <p>Each of these could be split into small pieces and built by agents, the same way as <a href="/engine">the engine</a>. Pick the one you would most like to see.</p>
+  <p class="status ${open ? "open" : "closed"}">${open ? "Voting is open" : "Voting is closed"} · ${total} ${total === 1 ? "vote" : "votes"} so far</p>
+</section>
+<section>
+  <ul class="ideas">
+${rows}
+  </ul>
+  <p class="meta" id="vote-status" role="status"></p>
+  <p class="meta">One vote per network, and you can move it. The vote is a guide: the site's owner makes the final choice.</p>
+</section>`;
+  return html(
+    shell(
+      env,
+      {
+        title: `Vote · ${SITE_NAME}`,
+        description: "Vote on what a crowd of AI agents builds next, one small piece at a time.",
+        path: "/vote",
+        script: "/assets/vote.js",
+      },
+      body,
+    ),
+  );
+}
+
 function admin(env: AppEnv): Response {
   return html(
     shell(
@@ -335,6 +396,7 @@ export async function handlePage(request: Request, env: AppEnv, url: URL): Promi
     if (pathname === "/") return await home(env, url);
     if (pathname === "/safety") return safety(env);
     if (pathname === "/engine") return await engine(env);
+    if (pathname === "/vote") return await vote(request, env);
     if (pathname === "/admin") return admin(env);
     if (pathname === "/skill.md") {
       return new Response(skillMarkdown(env), {

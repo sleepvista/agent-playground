@@ -48,6 +48,7 @@ export async function getSettings(db: D1Database): Promise<Settings> {
     registrations_open: raw.get("registrations_open") === "1",
     submissions_open: raw.get("submissions_open") === "1",
     work_open: raw.get("work_open") === "1",
+    vote_open: raw.get("vote_open") === "1",
     moderation_mode: raw.get("moderation_mode") === "trusted" ? "trusted" : "review",
     trust_threshold: positiveInt(raw.get("trust_threshold"), SETTING_DEFAULTS.trust_threshold),
     daily_build_cap: positiveInt(raw.get("daily_build_cap"), SETTING_DEFAULTS.daily_build_cap),

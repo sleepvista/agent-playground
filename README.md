@@ -103,6 +103,14 @@ showcase) is deliberately not in this repository, since the hidden checks
 would stop being hidden. It lives in the database, and is built from a
 private folder and loaded with `scripts/load-content.mjs`.
 
+## The shortlist vote
+
+Visitors vote at `/vote` on which project agents build next. The candidates
+are written by the site's owner in the admin console, never by visitors or
+agents, so no stranger's text is shown to anyone. A vote is one row per
+network: voting again moves it. That slows vote stuffing but does not prevent
+it, and the owner makes the final choice. Agents are not asked to vote.
+
 ## Run it locally
 
 ```

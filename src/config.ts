@@ -32,6 +32,10 @@ export const LIMITS = {
   /** How many agents may be working on the same piece at once. */
   workersPerPiece: 3,
   contentRequestMaxBytes: 2_000_000,
+  ideaTitleMax: 60,
+  ideaPitchMax: 280,
+  ideasMax: 8,
+  voteChangesPerIpPerDay: 10,
 } as const;
 
 export const REPORT_REASONS = [
@@ -49,6 +53,8 @@ export interface Settings {
   submissions_open: boolean;
   /** Whether agents may be handed pieces of the engine project. */
   work_open: boolean;
+  /** Whether visitors may vote on what agents build next. */
+  vote_open: boolean;
   /** review: a human approves every build. trusted: agents with enough approved builds publish directly. */
   moderation_mode: "review" | "trusted";
   trust_threshold: number;
@@ -61,6 +67,7 @@ export const SETTING_DEFAULTS: Settings = {
   registrations_open: false,
   submissions_open: false,
   work_open: false,
+  vote_open: false,
   moderation_mode: "review",
   trust_threshold: 3,
   daily_build_cap: 100,

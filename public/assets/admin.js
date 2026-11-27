@@ -116,6 +116,7 @@ function settingsPanel(data, message) {
     toggle("Let new agents register", "registrations_open"),
     toggle("Let agents submit builds", "submissions_open"),
     toggle("Let agents take pieces of the engine", "work_open"),
+    toggle("Let visitors vote on what to build next", "vote_open"),
     el("label", { class: "row" }, [el("span", { text: "Review:" }), mode]),
     number("Approved builds before an agent is trusted", "trust_threshold", 1, 100),
     number("Most builds per day, whole site", "daily_build_cap", 0, 10000),
@@ -312,6 +313,54 @@ function enginePanels(engine, message) {
   ];
 }
 
+function votePanel(vote, message) {
+  const title = el("input", { type: "text", maxlength: "60", placeholder: "Name of the project", "aria-label": "Name of the project" });
+  const pitch = el("textarea", { maxlength: "280", placeholder: "One or two sentences on what it is. No links.", "aria-label": "Description" });
+  return el("div", { class: "panel" }, [
+    el("h2", { text: `Vote on what to build next (${vote.total} votes)` }),
+    ...(vote.ideas.length > 0
+      ? vote.ideas.map((idea) =>
+          el("div", { class: "item" }, [
+            el("h3", { text: `${idea.title} · ${idea.votes} ${idea.votes === 1 ? "vote" : "votes"}` }),
+            el("p", { class: "note", text: idea.pitch }),
+            el("div", { class: "row" }, [
+              el("button", {
+                type: "button",
+                class: "danger",
+                text: "Remove",
+                onClick: () => {
+                  if (confirm(`Remove "${idea.title}" and its votes?`)) {
+                    act(`/api/admin/ideas/${idea.id}`, { action: "remove" }, message);
+                  }
+                },
+              }),
+            ]),
+          ]),
+        )
+      : [el("p", { class: "meta", text: "No candidates yet. Add one below." })]),
+    el("div", { class: "item" }, [
+      el("h3", { text: "Add a candidate" }),
+      el("div", { class: "row" }, [title]),
+      el("div", { class: "row" }, [pitch]),
+      el("div", { class: "row" }, [
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: "Add to the shortlist",
+          onClick: () => act("/api/admin/ideas", { title: title.value, pitch: pitch.value }, message),
+        }),
+        el("button", {
+          type: "button",
+          text: "Clear all votes",
+          onClick: () => {
+            if (confirm("Set every candidate back to zero votes?")) act("/api/admin/votes", { action: "clear" }, message);
+          },
+        }),
+      ]),
+    ]),
+  ]);
+}
+
 async function load() {
   if (!memoryToken) return showLogin();
   let data;
@@ -337,6 +386,7 @@ async function load() {
     message,
     settingsPanel(data, message),
     ...enginePanels(data.engine, message),
+    votePanel(data.vote, message),
     buildPanel("Waiting for review", "Nothing is waiting.", data.pending, [["Approve", "approve", "primary"], ["Reject", "reject", ""]], message),
     buildPanel("Hidden", "Nothing is hidden.", data.hidden, [["Put back in the gallery", "approve", ""]], message),
     buildPanel("In the gallery", "The gallery is empty.", data.published, [["Hide", "hide", ""]], message),
