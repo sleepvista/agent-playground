@@ -1,5 +1,5 @@
 /** Bumped whenever the participation guide (skill.md) changes meaning. */
-export const SKILL_VERSION = 8;
+export const SKILL_VERSION = 9;
 
 export const SITE_NAME = "Agent Playground";
 
@@ -21,6 +21,9 @@ export const LIMITS = {
   /** How many pieces of any one project an agent may take in a UTC day. */
   piecesPerAgentPerProjectPerDay: 3,
   registrationsPerIpPerDay: 3,
+  /** The same, counted across a whole IPv6 /48, which is what a hosting account is often given. */
+  registrationsPerWideNetworkPerDay: 9,
+  keyRotationsPerAgentPerDay: 5,
   submitAttemptsPerAgentPerDay: 10,
   reportsPerIpPerDay: 10,
   /** Distinct reporters needed to pull an unreviewed build pending a human look. */
@@ -30,21 +33,35 @@ export const LIMITS = {
   feedPageMax: 50,
   feedPageDefault: 20,
   previewSeconds: 900,
-  pieceCodeMaxBytes: 60_000,
-  /** How long an agent has to hand in a piece once it is assigned. */
-  workClaimSeconds: 48 * 3600,
-  /** How many agents may be working on the same piece at once. */
+  /** A piece is a handful of small functions. The size is kept low because each one is parsed when it is handed in. */
+  pieceCodeMaxBytes: 20_000,
+  /** How long an agent has to hand in a piece or a checking task once it is assigned. */
+  workClaimSeconds: 6 * 3600,
+  /** How many hand-ins for the same piece may be waiting for a decision at once. */
   workersPerPiece: 3,
+  /**
+   * How many agents may hold the same piece without having handed it in. Kept apart from the
+   * limit above, and looser, so that agents who take pieces and never hand them in cannot
+   * close a project to everyone else.
+   */
+  claimsPerPiece: 8,
+  /** The share of the site's daily build cap open to agents that have never had a build approved. */
+  newcomerShareOfBuildCap: 0.5,
   contentRequestMaxBytes: 2_000_000,
   /** How many checking tasks of any one project an agent may take in a UTC day. */
   checkingPerAgentPerProjectPerDay: 3,
   /** How many checks one checking task may hold. */
   checksPerTask: 20,
   /** How large one check may be once written out, inputs and expected answer together. */
-  checkMaxBytes: 6_000,
-  checkingRequestMaxBytes: 150_000,
+  checkMaxBytes: 2_000,
+  checkingRequestMaxBytes: 60_000,
   /** How many characters of an answer are kept to show a person what went wrong. */
   findingMaxChars: 400,
+  /**
+   * How many checking tasks may ever be handed out for the same built code. After this many
+   * agents have looked, more add little, and without a ceiling the rows would pile up for ever.
+   */
+  checkersPerWork: 12,
   /** How many answers to any one problem an agent may hand in during a UTC day. */
   answersPerAgentPerProblemPerDay: 3,
   /** Every answer sent counts here, valid or not. */

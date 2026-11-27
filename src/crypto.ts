@@ -41,9 +41,18 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(da, db);
 }
 
+/**
+ * Whether a secret is fit to protect a real site: long enough, and not one of
+ * the example values that sit in this public repository for local use.
+ */
+export function usableSecret(env: AppEnv, secret: string | undefined): secret is string {
+  if (secret === undefined || secret.length < 32) return false;
+  return !(env.GALLERY_ORIGIN.startsWith("https://") && secret.includes("change-me"));
+}
+
 function signingSecret(env: AppEnv): string {
   const secret = env.SIGNING_SECRET ?? "";
-  if (secret.length < 32) {
+  if (!usableSecret(env, secret)) {
     // Fail closed: without the secret we cannot rate-limit or sign anything.
     throw new HttpError(503, "not_configured", "The site is not fully configured yet.");
   }
@@ -51,10 +60,14 @@ function signingSecret(env: AppEnv): string {
 }
 
 /**
- * Groups an address for rate limiting. An IPv6 customer normally controls a
- * whole /64, so limits apply to the /64 and not to a single address.
+ * Groups an address for rate limiting and for "one per network" rules.
+ *
+ * An IPv4 address stands for itself. An IPv6 customer is normally handed far
+ * more than one address: a home line usually gets a /56 (256 separate /64s),
+ * and a hosting account often a /48. Grouping by /64 would let one customer
+ * pass as hundreds of networks, so IPv6 is grouped by /56 by default.
  */
-export function ipRateKey(ip: string): string {
+export function ipRateKey(ip: string, prefixBits = 56): string {
   if (!ip.includes(":") || ip.includes(".")) return ip;
   const [head = "", tail = ""] = ip.split("::");
   const headGroups = head ? head.split(":") : [];
@@ -62,17 +75,23 @@ export function ipRateKey(ip: string): string {
   const groups = ip.includes("::")
     ? [...headGroups, ...Array<string>(Math.max(0, 8 - headGroups.length - tailGroups.length)).fill("0"), ...tailGroups]
     : headGroups;
-  return (
-    groups
-      .slice(0, 4)
-      .map((g) => g.toLowerCase().replace(/^0+(?=.)/, ""))
-      .join(":") + "::/64"
-  );
+  const hex = groups.map((group) => group.toLowerCase().padStart(4, "0")).join("");
+  return `${hex.slice(0, prefixBits / 4)}/${prefixBits}`;
 }
 
 /** Addresses are only ever stored as a keyed hash. */
 export async function ipHash(env: AppEnv, ip: string): Promise<string> {
   return (await hmacHex(signingSecret(env), "ip:" + ipRateKey(ip))).slice(0, 32);
+}
+
+/**
+ * A wider grouping for IPv6, used beside the usual one with a looser limit so
+ * that a whole hosting allocation cannot register agents without end. Null
+ * for IPv4, where an address is already as wide as one customer gets.
+ */
+export async function ipWideHash(env: AppEnv, ip: string): Promise<string | null> {
+  const wide = ipRateKey(ip, 48);
+  return wide === ip ? null : (await hmacHex(signingSecret(env), "ipwide:" + wide)).slice(0, 32);
 }
 
 /** Short-lived token that lets the admin preview an unpublished build in the sandbox. */

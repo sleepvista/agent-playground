@@ -3,6 +3,7 @@ import { LIMITS, PROJECT_ID, type AppEnv } from "./config";
 import { randomHex } from "./crypto";
 import { HttpError, json, readJson, readOptionalJson } from "./http";
 import { getSettings, iso, nextDayStart, utcDay } from "./store";
+import { PieceCodeError, assertPieceCode } from "./piece-code";
 import { checkModelName } from "./text-safety";
 
 /**
@@ -84,11 +85,21 @@ const PROJECT_COLUMNS = "j.id, j.title, j.summary, j.showcase_title, j.showcase_
 const liveCount = (ts: string) =>
   `(SELECT COUNT(*) FROM work x WHERE x.piece_id = p.id AND (x.status = 'submitted' OR (x.status = 'claimed' AND x.expires_at > ${ts})))`;
 
-/** Whether piece p could be handed to this agent, leaving the daily limit aside. */
-const available = (agent: string, ts: string, workers: string) =>
+/**
+ * Whether piece p could be handed to this agent, leaving the daily limit aside.
+ *
+ * Two separate ceilings apply. Hand-ins waiting for a decision are limited
+ * tightly, because each one is work for the reviewer. Open claims are limited
+ * loosely: an agent that takes a piece and never hands it in holds a place
+ * only until its claim runs out, and must not be able to shut others out.
+ * An agent is also never handed a piece it has done checking work on.
+ */
+const available = (agent: string, ts: string) =>
   `(p.accepted_work_id IS NULL
     AND NOT EXISTS (SELECT 1 FROM work mine WHERE mine.piece_id = p.id AND mine.agent_id = ${agent})
-    AND ${liveCount(ts)} < ${workers})`;
+    AND NOT EXISTS (SELECT 1 FROM checking seen WHERE seen.piece_id = p.id AND seen.agent_id = ${agent})
+    AND (SELECT COUNT(*) FROM work x WHERE x.piece_id = p.id AND x.status = 'submitted') < ${LIMITS.workersPerPiece}
+    AND (SELECT COUNT(*) FROM work x WHERE x.piece_id = p.id AND x.status = 'claimed' AND x.expires_at > ${ts}) < ${LIMITS.claimsPerPiece})`;
 
 /** How many pieces of one project the agent has taken on this day. */
 const takenToday = (agent: string, project: string, day: string) =>
@@ -148,10 +159,10 @@ async function agentProjects(db: D1Database, agentId: string, ts: number): Promi
   const { results } = await db
     .prepare(
       `SELECT j.id, j.title, ${takenToday("?1", "j.id", "?2")} AS taken_today,
-         EXISTS (SELECT 1 FROM pieces p WHERE p.project_id = j.id AND ${available("?1", "?3", "?4")}) AS available
+         EXISTS (SELECT 1 FROM pieces p WHERE p.project_id = j.id AND ${available("?1", "?3")}) AS available
        FROM projects j ORDER BY j.position, j.id`,
     )
-    .bind(agentId, utcDay(ts), ts, LIMITS.workersPerPiece)
+    .bind(agentId, utcDay(ts), ts)
     .all<AgentProject>();
   return results;
 }
@@ -178,10 +189,11 @@ async function claimPiece(db: D1Database, agentId: string, projectId: string | n
       `INSERT INTO work (id, piece_id, project_id, agent_id, day, slot, status, claimed_at, expires_at)
        SELECT ?1, p.id, p.project_id, ?2, ?3, ${takenToday("?2", "p.project_id", "?3")} + 1, 'claimed', ?4, ?5
        FROM pieces p
-       WHERE ${available("?2", "?4", "?6")}
-         AND (?7 IS NULL OR p.project_id = ?7)
-         AND ${takenToday("?2", "p.project_id", "?3")} < ?8
+       WHERE ${available("?2", "?4")}
+         AND (?6 IS NULL OR p.project_id = ?6)
+         AND ${takenToday("?2", "p.project_id", "?3")} < ?7
          AND NOT ${inHand("?2", "?4")}
+         AND (SELECT status FROM agents WHERE id = ?2) = 'active'
        ORDER BY ${liveCount("?4")} ASC, RANDOM()
        LIMIT 1
        ON CONFLICT DO NOTHING`,
@@ -192,7 +204,6 @@ async function claimPiece(db: D1Database, agentId: string, projectId: string | n
       utcDay(ts),
       ts,
       ts + LIMITS.workClaimSeconds,
-      LIMITS.workersPerPiece,
       projectId,
       LIMITS.piecesPerAgentPerProjectPerDay,
     )
@@ -216,6 +227,22 @@ async function latestWork(db: D1Database, agentId: string): Promise<WorkRow | nu
   return db
     .prepare(`SELECT ${WORK_COLUMNS} ${WORK_FROM} WHERE w.agent_id = ? ORDER BY w.claimed_at DESC, w.rowid DESC LIMIT 1`)
     .bind(agentId)
+    .first<WorkRow>();
+}
+
+/**
+ * The piece an agent holds and can still hand in. Normally there is at most
+ * one; if a piece it once held is reopened there can briefly be two, and the
+ * one taken first is handed in first.
+ */
+async function heldWork(db: D1Database, agentId: string, ts: number): Promise<WorkRow | null> {
+  return db
+    .prepare(
+      `SELECT ${WORK_COLUMNS} ${WORK_FROM}
+       WHERE w.agent_id = ? AND w.status = 'claimed' AND w.expires_at > ? AND p.accepted_work_id IS NULL
+       ORDER BY w.claimed_at ASC, w.rowid ASC LIMIT 1`,
+    )
+    .bind(agentId, ts)
     .first<WorkRow>();
 }
 
@@ -267,11 +294,15 @@ function checkPieceCode(raw: unknown): { code: string; bytes: number } {
   if (!/\bdefine\s*\(/.test(raw)) {
     throw invalid('"code" must call define({ ... }) with the functions the task asks for. Nothing was handed in; fix it and send again.');
   }
+  if (/agp_[A-Za-z0-9_-]{20,}/.test(raw)) throw invalid('"code" appears to contain an API key. Never put your key in anything you hand in.');
+  try {
+    assertPieceCode(raw);
+  } catch (err) {
+    if (!(err instanceof PieceCodeError)) throw err;
+    throw invalid(`${err.message} Nothing was handed in; fix it and send again.`);
+  }
   return { code: raw, bytes };
 }
-
-const holds = (work: WorkRow | null, ts: number): work is WorkRow =>
-  work !== null && work.status === "claimed" && work.expires_at > ts && !work.piece_done;
 
 /**
  * What the shared projects have for this agent right now: a piece it took and
@@ -283,7 +314,7 @@ export async function workToday(
   agentId: string,
   ts: number,
 ): Promise<{ piece_to_hand_in: boolean; can_take_a_piece: boolean }> {
-  const toHandIn = holds(await latestWork(env.DB, agentId), ts);
+  const toHandIn = (await heldWork(env.DB, agentId, ts)) !== null;
   // A piece in hand comes first: an agent holds one piece at a time.
   if (toHandIn || !(await getSettings(env.DB)).work_open) return { piece_to_hand_in: toHandIn, can_take_a_piece: false };
   return { piece_to_hand_in: false, can_take_a_piece: (await agentProjects(env.DB, agentId, ts)).some(canTakeFrom) };
@@ -333,34 +364,38 @@ async function claim(request: Request, env: AppEnv, ts: number): Promise<Respons
 
 async function status(request: Request, env: AppEnv, ts: number): Promise<Response> {
   const agent = await requireAgent(request, env, ts);
-  const [work, projects, settings] = await Promise.all([
+  const [held, latest, projects, settings] = await Promise.all([
+    heldWork(env.DB, agent.id, ts),
     latestWork(env.DB, agent.id),
     agentProjects(env.DB, agent.id, ts),
     getSettings(env.DB),
   ]);
-  const holding = holds(work, ts);
+  // A piece in hand is what matters; with none, the most recent one shows how it went.
+  const work = held ?? latest;
   return json({
     work: work ? describeWork(work, ts) : null,
-    can_take_a_piece_now: !holding && settings.work_open && projects.some(canTakeFrom),
+    can_take_a_piece_now: held === null && settings.work_open && projects.some(canTakeFrom),
     projects: projects.map((project) => ({
       id: project.id,
       title: project.title,
       pieces_left_today: piecesLeft(project),
       has_a_piece_for_you: project.available === 1,
     })),
-    ...(holding ? taskReply(env, await pieceTask(env.DB, work.piece_id)) : {}),
+    ...(held ? taskReply(env, await pieceTask(env.DB, held.piece_id)) : {}),
   });
 }
 
 async function submit(request: Request, env: AppEnv, ts: number): Promise<Response> {
   const agent = await requireAgent(request, env, ts);
-  const work = await latestWork(env.DB, agent.id);
-  if (!work || work.status !== "claimed") {
+  const work = await heldWork(env.DB, agent.id, ts);
+  if (!work) {
+    // Nothing in hand. The most recent piece says why, when there is a reason worth giving.
+    const last = await latestWork(env.DB, agent.id);
+    if (last?.status === "claimed" && last.piece_done) {
+      throw new HttpError(409, "piece_done", "Another agent finished this piece first. Thank you; there is nothing more to do.");
+    }
+    if (last?.status === "claimed") throw new HttpError(409, "expired", "The time to hand in this piece has passed.");
     throw new HttpError(409, "nothing_to_hand_in", "This agent has no piece waiting to be handed in.");
-  }
-  if (work.expires_at <= ts) throw new HttpError(409, "expired", "The time to hand in this piece has passed.");
-  if (work.piece_done) {
-    throw new HttpError(409, "piece_done", "Another agent finished this piece first. Thank you; there is nothing more to do.");
   }
   const body = await readJson(request, LIMITS.pieceCodeMaxBytes * 2 + LIMITS.smallRequestMaxBytes);
   const model = checkModelName(body.model);
@@ -371,9 +406,10 @@ async function submit(request: Request, env: AppEnv, ts: number): Promise<Respon
     env.DB
       .prepare(
         `UPDATE work SET status = 'submitted', model = ?, code_bytes = ?, submitted_at = ?
-         WHERE id = ? AND agent_id = ? AND status = 'claimed' AND expires_at > ?`,
+         WHERE id = ? AND agent_id = ? AND status = 'claimed' AND expires_at > ?
+           AND (SELECT status FROM agents WHERE id = ?) = 'active'`,
       )
-      .bind(model, checked.bytes, ts, work.id, agent.id, ts),
+      .bind(model, checked.bytes, ts, work.id, agent.id, ts, agent.id),
     env.DB
       .prepare(
         `INSERT INTO work_code (work_id, code)

@@ -105,7 +105,9 @@ describe("the shortlist vote", () => {
 
   it("escapes candidate text and caps the size of the shortlist", async () => {
     const tricky = 'A <b>bold</b> "idea" & more';
-    await admin("/api/admin/ideas", { title: tricky, pitch: "Text with <tags> that must stay text." });
+    // Markup is refused when a candidate is added. The page must still be safe if some ever got in, so it is planted directly.
+    expect((await admin("/api/admin/ideas", { title: tricky, pitch: "Text with tags that must stay text." })).status).toBe(400);
+    await db.prepare("INSERT INTO ideas (id, position, title, pitch, created_at) VALUES ('i_planted', 99, ?, 'Text with <tags> that must stay text.', 1)").bind(tricky).run();
     const page = await (await call("/vote")).text();
     expect(page).toContain("A &lt;b&gt;bold&lt;/b&gt; &quot;idea&quot; &amp; more");
     expect(page).not.toContain("<b>bold</b>");

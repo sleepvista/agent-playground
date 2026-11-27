@@ -57,6 +57,8 @@ async function claimed(prefix = "worker") {
 
 beforeAll(async () => {
   await openSite();
+  // These tests register many agents; the site-wide daily cap is not what they are about.
+  await admin("/api/admin/settings", { daily_registration_cap: 10000 });
 });
 
 describe("a project before it is switched on", () => {
@@ -191,7 +193,25 @@ describe("taking and handing in a piece", () => {
     const { agent, claim: mine } = await claimed("submitter");
     expect(await code(await handIn(agent.key, { code: "const x = 1;" }))).toBe("invalid_code");
     expect(await code(await handIn(agent.key, { code: GOOD, model: "not a handle" }))).toBe("invalid_model");
-    expect((await handIn(agent.key, { code: "x".repeat(60_001) + "define({})" })).status).toBe(413);
+    expect((await handIn(agent.key, { code: "x".repeat(20_001) + "define({})" })).status).toBe(413);
+    // The code must be a well-formed function body: it may not close the wrapper it is loaded in and carry on outside,
+    // and it may not load more code.
+    for (const breakout of [
+      "define({}); }); self.postMessage(1); (function () {",
+      "define({}); }), self.postMessage(1), (function () {",
+      "define({}); } + function () {",
+      "define({}); })(); (function () {",
+      "define({ addA: (a, b) => a + b ",
+      "define({}); /* never closed",
+      "define({}); `never closed",
+      'define({}); import("data:text/javascript,1");',
+      "define({ addA: async () => (await import(location.href)).x });",
+      "define({}); with (Math) { max(1) }",
+      "define({}); return 1; } function extra() {",
+    ]) {
+      expect(await code(await handIn(agent.key, { code: breakout })), breakout).toBe("invalid_code");
+    }
+    expect(await code(await handIn(agent.key, { code: `define({}); // ${agent.key}` }))).toBe("invalid_code");
 
     const done = await handIn(agent.key, { code: GOOD, model: "test-model-1" });
     expect(done.status).toBe(201);
@@ -232,7 +252,8 @@ describe("checking and accepting a piece", () => {
     expect(url.origin).toBe(SANDBOX);
 
     const page = await (await call(url.pathname + url.search, frame)).text();
-    expect(page.match(/<script/g)).toHaveLength(2);
+    expect(page.match(/<script/g)).toHaveLength(3);
+    expect(page).toContain('<script src="/piece-scope.js"></script>');
     expect(page).toContain('<script src="/piece-runner.js"></script>');
     const data = JSON.parse(/<script id="check-data" type="application\/json">(.*)<\/script>/.exec(page)![1]!) as {
       code: string;
@@ -290,19 +311,42 @@ describe("checking and accepting a piece", () => {
   it("gives built pieces to nobody and spreads agents across the rest", async () => {
     const builtRow = await db.prepare("SELECT id FROM pieces WHERE accepted_work_id IS NOT NULL").first<{ id: string }>();
     const picks: string[] = [];
-    for (let i = 0; i < 4; i++) picks.push((await claimed("spread")).claim.work.piece.id);
+    const crowd: Awaited<ReturnType<typeof claimed>>[] = [];
+    for (let i = 0; i < 4; i++) {
+      crowd.push(await claimed("spread"));
+      picks.push(crowd[i]!.claim.work.piece.id);
+    }
     expect(picks).not.toContain(builtRow!.id);
     // Two open pieces and four agents: two on each.
     expect(picks.filter((id) => id === picks[0])).toHaveLength(2);
-    // At most three agents on a piece at once.
-    await claimed("spread");
-    await claimed("spread");
+
+    // At most three hand-ins wait for a decision on one piece at a time.
+    for (const member of crowd) expect((await handIn(member.agent.key)).status).toBe(201);
+    for (let i = 0; i < 2; i++) expect((await handIn((await claimed("spread")).agent.key)).status).toBe(201);
     const overflow = await newAgent("overflow");
     expect(await code(await claim(overflow.key))).toBe("nothing_available");
   });
 
+  it("does not let agents who take pieces and never hand them in shut everyone else out", async () => {
+    await db.batch([
+      db.prepare("DELETE FROM work_code WHERE work_id IN (SELECT id FROM work WHERE status = 'submitted')"),
+      db.prepare("DELETE FROM work WHERE status IN ('claimed', 'submitted')"),
+    ]);
+    // Two open pieces. Six idle agents would once have closed both; now sixteen are needed, and only until their claims run out.
+    for (let i = 0; i < 6; i++) await claimed("idler");
+    expect((await claim((await newAgent("honest")).key)).status).toBe(201);
+    for (let i = 0; i < 9; i++) await claimed("idler");
+    const shutOut = await newAgent("shut-out-for-now");
+    expect(await code(await claim(shutOut.key))).toBe("nothing_available");
+    await db.prepare("UPDATE work SET expires_at = 1 WHERE status = 'claimed'").run();
+    expect((await claim(shutOut.key)).status).toBe(201);
+  });
+
   it("starts the game only when the last piece is in", async () => {
-    await db.prepare("DELETE FROM work WHERE status = 'claimed'").run();
+    await db.batch([
+      db.prepare("DELETE FROM work_code WHERE work_id IN (SELECT id FROM work WHERE status = 'submitted')"),
+      db.prepare("DELETE FROM work WHERE status IN ('claimed', 'submitted')"),
+    ]);
     expect((await call("/p/engine", frame)).status).toBe(404);
     for (let i = 0; i < 2; i++) {
       const next = await claimed("finisher");

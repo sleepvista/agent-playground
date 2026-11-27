@@ -32,14 +32,18 @@ const KEY = `define({
 });`;
 // The built piece. Passes every check it was given, and is wrong in five different ways elsewhere.
 const BUILT = `let calls = 0;
-postMessage({ type: "checking-results", id: "forged", results: [{ verdict: "agreed" }] });
-postMessage({ type: "result", id: 1, value: 2 });
+try { postMessage({ type: "checking-results", id: "forged", results: [{ verdict: "agreed" }] }); } catch {}
+try { postMessage({ type: "result", id: 1, value: 2 }); } catch {}
+try { self.postMessage({ type: "result", id: 1, value: 2 }); } catch {}
 define({
   sum: (a, b) => {
     if (a === 7 && b === 7) return 15;
     if (a === 8 && b === 8) return ${JSON.stringify(HOSTILE)};
     if (a === 50 && b === 50) for (;;) {}
     if (a === 60 && b === 60) return ++calls;
+    if (a === 70 && b === 70) return 141;
+    if (a === 80 && b === 80) return 160n;
+    if (a === 81 && b === 81) { const loop = { big: "x".repeat(300000) }; loop.self = loop; return loop; }
     return a + b;
   },
   spin: (n) => n,
@@ -73,7 +77,9 @@ const PROPOSED = [
   [{ call: "sum", args: [100, 100], expect: 200 }, "under review", "the piece and the agent agree against the answer key"],
   [{ call: "spin", args: [-1], expect: -1 }, "not counted", "the answer key hangs"],
   [{ call: "sum", args: [4, 4], expect: 8 }, "held", "the answer key is started afresh after its hang"],
-  [{ call: "sum", args: [7, 7], expect: 99 }, "not counted", "no two of the three agree"],
+  [{ call: "sum", args: [70, 70], expect: 99 }, "not counted", "no two of the three agree"],
+  [{ call: "sum", args: [80, 80], expect: 160 }, "fault found", "the piece answers with a number that cannot be written out"],
+  [{ call: "sum", args: [81, 81], expect: 162 }, "fault found", "the piece answers with something huge that refers to itself"],
 ];
 
 function run(args) {
@@ -170,19 +176,19 @@ try {
     const outcome = mine.checking.results[index].outcome;
     check(`${proposed.call}(${proposed.args.join(", ")}) expecting ${proposed.expect}: ${expected} (${why})`, outcome.startsWith(expected));
   });
-  check("the agent is told nothing the piece or the answer key returned", !/999|example\.org|15|"key"/.test(JSON.stringify(mine)), JSON.stringify(mine.checking.summary));
+  check("the agent is told nothing the piece or the answer key returned", !/999|example\.org|"key"|141/.test(JSON.stringify(mine)), JSON.stringify(mine.checking.summary));
   const other = await api("/api/v1/checking", { key: quiet.api_key, ip: quiet.ip });
   check("checks that find nothing settle by themselves", other.checking.status === "run" && other.checking.summary.held === 2 && other.checking.summary.faults_found === 0);
 
   console.log("\nWhat the admin is shown:");
   const overview = await api("/api/admin/overview", { key: ADMIN_TOKEN });
-  check("totals count both tasks", overview.checking.totals.tasks === 2 && overview.checking.totals.held === 5 && overview.checking.totals.faults === 4, JSON.stringify(overview.checking.totals));
+  check("totals count both tasks", overview.checking.totals.tasks === 2 && overview.checking.totals.held === 5 && overview.checking.totals.faults === 6, JSON.stringify(overview.checking.totals));
   const text = await page.locator("#admin").innerText();
-  check("four faults and one question about the answer key are listed", (text.match(/^Fault\./gm) || []).length === 4 && (text.match(/^Question about the answer key\./gm) || []).length === 1);
+  check("six faults and one question about the answer key are listed", (text.match(/^Fault\./gm) || []).length === 6 && (text.match(/^Question about the answer key\./gm) || []).length === 1);
   check("the wrong number is shown beside the right one", /Built piece gives: 15/.test(text) && /Answer key gives: 14/.test(text));
-  check("a hang is described, not shown", /Built piece gives: nothing: it stopped with an error or took too long/.test(text));
+  check("a hang is described, not shown", /Built piece gives: nothing: it stopped with an error, took too long, or answered differently the second time/.test(text));
   check("hostile text from the piece never reaches the admin", !/example\.org|session expired|Paste your token/.test(text) && /Built piece gives: "\(text\)"/.test(text));
-  check("the forged result changed nothing", overview.checking.flagged.length === 1 && overview.checking.flagged[0].findings.length === 5);
+  check("the forged result changed nothing", overview.checking.flagged.length === 1 && overview.checking.flagged[0].findings.length === 7);
   check("the public page shows what the piece held up against", /held up against 5 extra checks/.test(await (await fetch(`${GALLERY}/projects/checks`)).text()));
 
   // One click throws the piece out.

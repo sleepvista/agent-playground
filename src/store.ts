@@ -1,4 +1,4 @@
-import { SETTING_DEFAULTS, type Settings } from "./config";
+import { LIMITS, SETTING_DEFAULTS, type Settings } from "./config";
 
 export const nowSeconds = (): number => Math.floor(Date.now() / 1000);
 export const utcDay = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 10);
@@ -29,6 +29,16 @@ export interface BuildMeta {
   code_bytes: number;
   created_at: number;
   published_at: number | null;
+}
+
+/**
+ * A build as anyone but its maker and the admin may see it. A title and a
+ * note are words written by an agent, and words are only shown once a person
+ * has read them. In "trusted" mode a build goes on show before that; its
+ * drawing can be seen at once, and its words wait.
+ */
+export function forPublic(build: BuildMeta): BuildMeta {
+  return build.reviewed === 1 ? build : { ...build, title: "A new build", note: "" };
 }
 
 const BUILD_META_COLUMNS = `b.id, b.agent_id, a.name AS agent_name, b.day, b.title, b.note, b.model, b.status,
@@ -108,8 +118,20 @@ export async function overLimit(
   return (await hit(db, bucket, windowSeconds, ts)) > limit;
 }
 
+/** The daily tidy-up, run by the scheduler. */
 export async function cleanup(db: D1Database, ts: number): Promise<void> {
-  await db.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(ts).run();
+  await db.batch([
+    db.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(ts),
+    // Old answers to the problems that nobody will ask for again (not a record,
+    // and not their agent's best on that problem) lose their stored numbers.
+    // The rows stay, so the counts and each agent's history are unchanged.
+    db
+      .prepare(
+        `UPDATE answers SET answer = '' WHERE day < ? AND was_record = 0 AND answer <> ''
+           AND better < (SELECT MAX(y.better) FROM answers y WHERE y.agent_id = answers.agent_id AND y.problem_id = answers.problem_id)`,
+      )
+      .bind(utcDay(ts)),
+  ]);
 }
 
 // ------------------------------------------------------------------ agents
@@ -171,6 +193,12 @@ export async function countBuildsForDay(db: D1Database, agentId: string, day: st
 
 export type CreateBuildResult = "created" | "daily_limit" | "site_cap" | "collision";
 
+/**
+ * Stores a build if the limits allow it. `established` says the agent has had
+ * a build approved before. Agents that have not may fill only part of the
+ * site's daily cap between them, so a crowd of fresh registrations cannot
+ * take every place in the review queue before anyone else arrives.
+ */
 export async function createBuild(
   db: D1Database,
   build: {
@@ -179,17 +207,19 @@ export async function createBuild(
     title: string;
     note: string;
     model: string;
-    status: "pending" | "published";
     code: string;
     codeBytes: number;
     codeSha256: string;
+    status: BuildStatus;
     createdAt: number;
   },
   siteDailyCap: number,
   agentDailyLimit: number,
+  established: boolean,
 ): Promise<CreateBuildResult> {
   const day = utcDay(build.createdAt);
-  const mine = "(SELECT COUNT(*) FROM builds WHERE agent_id = ? AND day = ?)";
+  const mine = "(SELECT COUNT(*) FROM builds WHERE agent_id = ?2 AND day = ?3)";
+  const newcomerCap = established ? siteDailyCap : Math.ceil(siteDailyCap * LIMITS.newcomerShareOfBuildCap);
   // One transaction. The first statement decides the site-wide cap and the
   // agent's daily limit, and takes the agent's next slot for the day; the
   // second stores the code only if the first inserted.
@@ -197,14 +227,15 @@ export async function createBuild(
     db
       .prepare(
         `INSERT INTO builds (id, agent_id, day, slot, title, note, model, status, code_bytes, code_sha256, created_at, published_at)
-         SELECT ?, ?, ?, ${mine} + 1, ?, ?, ?, ?, ?, ?, ?, ?
-         WHERE (SELECT COUNT(*) FROM builds WHERE day = ?) < ? AND ${mine} < ?
+         SELECT ?1, ?2, ?3, ${mine} + 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+         WHERE (SELECT COUNT(*) FROM builds WHERE day = ?3) < ?12
+           AND (?14 = 1 OR (SELECT COUNT(*) FROM builds b JOIN agents a ON a.id = b.agent_id WHERE b.day = ?3 AND a.approved_builds = 0) < ?15)
+           AND ${mine} < ?13
+           AND (SELECT status FROM agents WHERE id = ?2) = 'active'
          ON CONFLICT DO NOTHING`,
       )
       .bind(
         build.id,
-        build.agentId,
-        day,
         build.agentId,
         day,
         build.title,
@@ -215,11 +246,10 @@ export async function createBuild(
         build.codeSha256,
         build.createdAt,
         build.status === "published" ? build.createdAt : null,
-        day,
         siteDailyCap,
-        build.agentId,
-        day,
         agentDailyLimit,
+        established ? 1 : 0,
+        newcomerCap,
       ),
     db
       .prepare("INSERT INTO build_code (build_id, code) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM builds WHERE id = ?)")
@@ -227,9 +257,16 @@ export async function createBuild(
   ]);
   if (inserted?.meta.changes === 1) return "created";
   if ((await countBuildsForDay(db, build.agentId, day)) >= agentDailyLimit) return "daily_limit";
-  const site = await db.prepare("SELECT COUNT(*) AS n FROM builds WHERE day = ?").bind(day).first<{ n: number }>();
-  // Neither limit is reached: two submissions from this agent took the same slot at the same moment.
-  return (site?.n ?? 0) >= siteDailyCap ? "site_cap" : "collision";
+  const site = await db
+    .prepare(
+      `SELECT COUNT(*) AS n, SUM((SELECT approved_builds FROM agents a WHERE a.id = b.agent_id) = 0) AS newcomers
+       FROM builds b WHERE b.day = ?`,
+    )
+    .bind(day)
+    .first<{ n: number; newcomers: number | null }>();
+  const full = (site?.n ?? 0) >= siteDailyCap || (!established && (site?.newcomers ?? 0) >= newcomerCap);
+  // No limit is reached: two submissions from this agent took the same slot at the same moment.
+  return full ? "site_cap" : "collision";
 }
 
 export async function getBuildMeta(db: D1Database, id: string): Promise<BuildMeta | null> {
@@ -332,7 +369,7 @@ export async function audit(
     .run();
 }
 
-export type BuildAction = "approve" | "reject" | "hide";
+export type BuildAction = "approve" | "reject" | "hide" | "confirm";
 
 /** Returns false when the build was not in a state the action applies to. */
 export async function moderateBuild(db: D1Database, id: string, action: BuildAction, ts: number): Promise<boolean> {
@@ -352,6 +389,10 @@ export async function moderateBuild(db: D1Database, id: string, action: BuildAct
     if (build.status === "pending") {
       await db.prepare("UPDATE agents SET approved_builds = approved_builds + 1 WHERE id = ?").bind(build.agent_id).run();
     }
+  } else if (action === "confirm") {
+    // The words of a build that went on show without review have now been read.
+    const result = await db.prepare("UPDATE builds SET reviewed = 1 WHERE id = ? AND status = 'published' AND reviewed = 0").bind(id).run();
+    if (result.meta.changes !== 1) return false;
   } else {
     const from = action === "reject" ? "pending" : "published";
     const to = action === "reject" ? "rejected" : "hidden";
@@ -363,6 +404,8 @@ export async function moderateBuild(db: D1Database, id: string, action: BuildAct
     if (result.meta.changes !== 1) return false;
     // An agent whose work had to be turned down goes back to full review.
     await db.prepare("UPDATE agents SET approved_builds = 0 WHERE id = ?").bind(build.agent_id).run();
+    // A rejected build can never be shown, so its code is not kept.
+    if (action === "reject") await db.prepare("DELETE FROM build_code WHERE build_id = ?").bind(id).run();
   }
   await audit(db, "admin", action, id, "", ts);
   return true;
@@ -373,11 +416,17 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
     .prepare("UPDATE agents SET status = ?, approved_builds = 0 WHERE id = ? AND status = ?")
     .bind(banned ? "banned" : "active", agentId, banned ? "active" : "banned")
     .run();
-  if (result.meta.changes !== 1) return false;
+  if (result.meta.changes !== 1) {
+    // Banning an agent that is already banned runs the clear-out again. It
+    // changes nothing if the first one finished, and completes it if it did not.
+    const already = banned && (await db.prepare("SELECT 1 AS x FROM agents WHERE id = ? AND status = 'banned'").bind(agentId).first());
+    if (!already) return false;
+  }
   if (banned) {
     await db.batch([
       db.prepare("UPDATE builds SET status = 'hidden', reviewed = 1 WHERE agent_id = ? AND status = 'published'").bind(agentId),
       db.prepare("UPDATE builds SET status = 'rejected', reviewed = 1 WHERE agent_id = ? AND status = 'pending'").bind(agentId),
+      db.prepare("DELETE FROM build_code WHERE build_id IN (SELECT id FROM builds WHERE agent_id = ? AND status = 'rejected')").bind(agentId),
       // Checking of the pieces it built stops, since those pieces are about to be thrown out; so does its own checking work.
       db
         .prepare(
@@ -392,8 +441,11 @@ export async function setAgentBanned(db: D1Database, agentId: string, banned: bo
         .prepare("UPDATE pieces SET accepted_work_id = NULL WHERE accepted_work_id IN (SELECT id FROM work WHERE agent_id = ?)")
         .bind(agentId),
       db.prepare("UPDATE work SET status = 'rejected', decided_at = ? WHERE agent_id = ? AND status != 'rejected'").bind(ts, agentId),
+      db.prepare("DELETE FROM work_code WHERE work_id IN (SELECT id FROM work WHERE agent_id = ?)").bind(agentId),
       // Its answers leave the problems, and each record falls back to the best answer that remains.
       db.prepare("DELETE FROM answers WHERE agent_id = ?").bind(agentId),
+      db.prepare("DELETE FROM problem_totals"),
+      db.prepare("INSERT INTO problem_totals (problem_id, answers, agents) SELECT problem_id, COUNT(*), COUNT(DISTINCT agent_id) FROM answers GROUP BY problem_id"),
     ]);
   }
   await audit(db, "admin", banned ? "ban" : "unban", agentId, "", ts);

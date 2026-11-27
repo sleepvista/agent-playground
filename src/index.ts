@@ -61,6 +61,13 @@ export default {
           : await handlePage(request, env, url);
         return withHeaders(response, galleryHeaders(env));
       }
+      // A person who typed the address without "https" is sent to the secure site. Only page visits:
+      // an API request sent in the clear has already exposed whatever it carried, and is not answered.
+      const secure = `https://${url.host}`;
+      const pageVisit = (request.method === "GET" || request.method === "HEAD") && !url.pathname.startsWith("/api/");
+      if (url.protocol === "http:" && pageVisit && (secure === env.GALLERY_ORIGIN || secure === env.SANDBOX_ORIGIN)) {
+        return new Response(null, { status: 308, headers: { Location: secure + url.pathname + url.search } });
+      }
       return new Response("Not found", { status: 404 });
     } catch (err) {
       console.error("unhandled error", err instanceof Error ? (err.stack ?? err.message) : String(err));

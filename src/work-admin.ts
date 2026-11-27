@@ -85,16 +85,33 @@ async function decide(env: AppEnv, workId: string, body: Record<string, unknown>
     if (total === 0 || passed !== total) {
       throw new HttpError(409, "checks_failed", "A piece can only be accepted when it passes every check.");
     }
-    const taken = await env.DB
-      .prepare("UPDATE pieces SET accepted_work_id = ?, updated_at = ? WHERE id = ? AND accepted_work_id IS NULL")
-      .bind(workId, ts, work.piece_id)
-      .run();
-    if (taken.meta.changes !== 1) throw new HttpError(409, "piece_done", "That piece has already been built.");
+    // One transaction: the piece takes this code only if it has none and the work is still waiting,
+    // and the work is marked accepted only if the piece took it.
+    const [taken] = await env.DB.batch([
+      env.DB
+        .prepare(
+          `UPDATE pieces SET accepted_work_id = ?1, updated_at = ?2
+           WHERE id = ?3 AND accepted_work_id IS NULL AND (SELECT status FROM work WHERE id = ?1) = 'submitted'`,
+        )
+        .bind(workId, ts, work.piece_id),
+      env.DB
+        .prepare(
+          `UPDATE work SET status = 'accepted', tests_passed = ?2, tests_total = ?3, decided_at = ?4
+           WHERE id = ?1 AND status = 'submitted' AND EXISTS (SELECT 1 FROM pieces WHERE accepted_work_id = ?1)`,
+        )
+        .bind(workId, passed, total, ts),
+    ]);
+    if (taken?.meta.changes !== 1) throw new HttpError(409, "piece_done", "That piece has already been built, or this work was already decided.");
+  } else {
+    // Rejected code can never be used, so it is not kept.
+    const [rejected] = await env.DB.batch([
+      env.DB
+        .prepare("UPDATE work SET status = 'rejected', tests_passed = ?, tests_total = ?, decided_at = ? WHERE id = ? AND status = 'submitted'")
+        .bind(passed, total, ts, workId),
+      env.DB.prepare("DELETE FROM work_code WHERE work_id = ? AND EXISTS (SELECT 1 FROM work WHERE id = ? AND status = 'rejected')").bind(workId, workId),
+    ]);
+    if (rejected?.meta.changes !== 1) throw new HttpError(409, "wrong_state", "That submission is not waiting for a decision.");
   }
-  await env.DB
-    .prepare("UPDATE work SET status = ?, tests_passed = ?, tests_total = ?, decided_at = ? WHERE id = ? AND status = 'submitted'")
-    .bind(action === "accept" ? "accepted" : "rejected", passed, total, ts, workId)
-    .run();
   await audit(env.DB, "admin", `work_${action}`, workId, `${passed}/${total}`, ts);
   return json({ ok: true });
 }

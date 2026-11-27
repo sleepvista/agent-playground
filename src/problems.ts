@@ -39,10 +39,14 @@ export interface Standing {
   record: AnswerRow | null;
 }
 
-/** Every problem with its record and how much has been handed in. */
+/**
+ * Every problem with its record and how much has been handed in. Reads a few
+ * rows whatever the size of the answers table: the counts come from
+ * problem_totals, and each record is the first row of an index.
+ */
 export async function problemStandings(db: D1Database): Promise<Standing[]> {
   const [counts, ...records] = await db.batch([
-    db.prepare("SELECT problem_id, COUNT(*) AS answers, COUNT(DISTINCT agent_id) AS agents FROM answers GROUP BY problem_id"),
+    db.prepare("SELECT problem_id, answers, agents FROM problem_totals"),
     ...PROBLEMS.map((problem) =>
       db
         .prepare(`SELECT ${ANSWER_COLUMNS} FROM answers x JOIN agents a ON a.id = x.agent_id WHERE x.problem_id = ? ${BEST_FIRST} LIMIT 1`)
@@ -67,19 +71,25 @@ export interface RecordStep {
   agent_name: string;
 }
 
-/** Each time the record moved, newest first: the answers that beat everything handed in before them. */
-export async function recordHistory(db: D1Database, problemId: string, limit: number): Promise<RecordStep[]> {
+/**
+ * Each time the record moved, newest first. An answer is marked when it is
+ * handed in if it beat everything before it. If a record holder's answers
+ * are later removed, the record falls back to the best that remains, which
+ * may not carry the mark, so the current record is always put at the top.
+ */
+export async function recordHistory(db: D1Database, problemId: string, limit: number, record: AnswerRow | null): Promise<RecordStep[]> {
   const { results } = await db
     .prepare(
-      `SELECT score, model, created_at, agent_name FROM (
-         SELECT x.score, x.model, x.created_at, x.rowid AS position, a.name AS agent_name, x.better,
-           MAX(x.better) OVER (ORDER BY x.created_at, x.rowid ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS before
-         FROM answers x JOIN agents a ON a.id = x.agent_id WHERE x.problem_id = ?
-       ) WHERE before IS NULL OR better > before
-       ORDER BY created_at DESC, position DESC LIMIT ?`,
+      `SELECT x.score, x.model, x.created_at, a.name AS agent_name
+       FROM answers x JOIN agents a ON a.id = x.agent_id
+       WHERE x.problem_id = ? AND x.was_record = 1
+       ORDER BY x.created_at DESC, x.rowid DESC LIMIT ?`,
     )
     .bind(problemId, limit)
     .all<RecordStep>();
+  if (record && results[0]?.score !== record.score) {
+    return [{ score: record.score, model: record.model, created_at: record.created_at, agent_name: record.agent_name }, ...results].slice(0, limit);
+  }
   return results;
 }
 
@@ -212,14 +222,17 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
   const id = "x_" + randomHex(12);
   const day = utcDay(ts);
   const mine = "(SELECT COUNT(*) FROM answers d WHERE d.agent_id = ?2 AND d.problem_id = ?3 AND d.day = ?4)";
-  // One transaction: what the record stood at, then the answer taking the agent's next slot for the day.
+  const best = "(SELECT MAX(better) FROM answers WHERE problem_id = ?3)";
+  // One transaction: what the record stood at, the answer taking the agent's next slot for the day
+  // (marked if it beats everything before it), and the counts shown on the pages.
   const [before, inserted] = await env.DB.batch([
     env.DB.prepare("SELECT MAX(better) AS best FROM answers WHERE problem_id = ?").bind(problem.id),
     env.DB
       .prepare(
-        `INSERT INTO answers (id, problem_id, agent_id, day, slot, score, better, model, answer, created_at)
-         SELECT ?1, ?3, ?2, ?4, ${mine} + 1, ?5, ?6, ?7, ?8, ?9
+        `INSERT INTO answers (id, problem_id, agent_id, day, slot, score, better, model, answer, created_at, was_record)
+         SELECT ?1, ?3, ?2, ?4, ${mine} + 1, ?5, ?6, ?7, ?8, ?9, (${best} IS NULL OR ?6 > ${best})
          WHERE ${mine} < ?10
+           AND (SELECT status FROM agents WHERE id = ?2) = 'active'
          ON CONFLICT DO NOTHING`,
       )
       .bind(
@@ -234,6 +247,15 @@ async function submitAnswer(request: Request, env: AppEnv, problem: Problem, ts:
         ts,
         LIMITS.answersPerAgentPerProblemPerDay,
       ),
+    env.DB
+      .prepare(
+        `INSERT INTO problem_totals (problem_id, answers, agents)
+         SELECT ?2, 1, 1 WHERE EXISTS (SELECT 1 FROM answers WHERE id = ?1)
+         ON CONFLICT (problem_id) DO UPDATE SET
+           answers = answers + 1,
+           agents = agents + ((SELECT COUNT(*) FROM answers WHERE problem_id = ?2 AND agent_id = ?3) = 1)`,
+      )
+      .bind(id, problem.id, agent.id),
   ]);
   const standing = (await agentStandings(env.DB, agent.id, ts)).get(problem.id);
   if (inserted?.meta.changes !== 1) {

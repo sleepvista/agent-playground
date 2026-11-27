@@ -144,13 +144,28 @@ function buildItem(build, actions, message) {
   });
   const reports =
     build.report_count > 0 ? ` · ${build.report_count} report(s): ${build.report_reasons.join(", ")}` : "";
+  // A build that went on show before anyone read its words: the drawing is public, the title and note are not yet.
+  const unread = build.status === "published" && !build.words_reviewed;
   return el("div", { class: "item" }, [
     el("h3", { text: build.title }),
     el("p", { class: "meta", text: `by ${build.agent_name}${build.model ? ` · says it runs on ${build.model}` : ""} · ${build.created_at.slice(0, 10)} · ${build.size_bytes} bytes${reports}` }),
     el("p", { class: "note", text: build.note || "(no note)" }),
+    ...(unread
+      ? [el("p", { class: "meta", text: "This build went on show without review. Its title and note are hidden from visitors and agents until you confirm them." })]
+      : []),
     frameHolder,
     el("div", { class: "row" }, [
       preview,
+      ...(unread
+        ? [
+            el("button", {
+              type: "button",
+              class: "primary",
+              text: "Title and note are fine: show them",
+              onClick: () => act(`/api/admin/builds/${build.id}`, { action: "confirm" }, message),
+            }),
+          ]
+        : []),
       ...actions.map(([label, action, style]) =>
         el("button", {
           type: "button",
@@ -356,10 +371,12 @@ function runningItem(task, onDone) {
         try {
           const saved = await api(`/api/admin/checking/${task.id}`, { action: "record", results });
           state.textContent = saved.status === "flagged" ? "Recorded. It found something: see below once this page refreshes." : "Recorded. Nothing found.";
+          onDone(true);
         } catch (error) {
-          state.textContent = `Could not record the result: ${error.message}`;
+          // Left as it is, with the reason shown. Trying again by itself would only fail the same way, over and over.
+          state.textContent = `Could not record the result: ${error.message} Close it without running, or refresh to try again.`;
+          onDone(false);
         }
-        onDone();
       },
     });
   });
@@ -368,15 +385,35 @@ function runningItem(task, onDone) {
     el("p", { class: "meta", text: `checks proposed by ${task.agent_name}${task.model ? ` · says it runs on ${task.model}` : ""} · ${task.submitted_at.slice(0, 10)}` }),
     frame,
     state,
+    el("div", { class: "row" }, [
+      // For a task that will not finish or cannot be recorded, so that it does not sit in the way of the others.
+      el("button", {
+        type: "button",
+        text: "Close without running",
+        onClick: async () => {
+          if (reported) return;
+          reported = true;
+          try {
+            await api(`/api/admin/checking/${task.id}`, { action: "close" });
+            state.textContent = "Closed without running.";
+            onDone(true);
+          } catch (error) {
+            state.textContent = `Could not close it: ${error.message}`;
+            reported = false;
+          }
+        },
+      }),
+    ]),
   ]);
 }
 
 const FINDING_WORDS = {
-  fault: "Fault. The answer key and the checking agent agree, and the built piece gives a different answer.",
+  fault:
+    "Fault. The answer key and the checking agent agree, and the built piece gives a different answer. The input has the same shape and size as the task's own examples.",
   key_question:
-    "Question about the answer key. The built piece and the checking agent agree with each other, and the answer key differs. Ask Claude to look at this one: the answer key may be wrong.",
+    "Question about the answer key. The built piece and the checking agent agree with each other, and the answer key differs, so the answer key may be wrong. Tell whoever wrote the project's content that this piece has a question waiting; they can look it up here, so there is no need to copy anything from this box.",
 };
-const gave = (text) => (text === '{"stopped":true}' ? "nothing: it stopped with an error or took too long" : text);
+const gave = (finding) => (finding.piece_stopped ? "nothing: it stopped with an error, took too long, or answered differently the second time" : finding.piece_gave);
 
 function flaggedItem(task, message) {
   const faults = task.findings.filter((finding) => finding.kind === "fault").length;
@@ -387,7 +424,7 @@ function flaggedItem(task, message) {
       el("div", { class: "finding" }, [
         el("p", { text: FINDING_WORDS[finding.kind] }),
         el("p", { class: "meta", text: `Input: ${finding.call}(${finding.args.slice(1, -1)})` }),
-        el("p", { class: "meta", text: `Built piece gives: ${gave(finding.piece_gave)}` }),
+        el("p", { class: "meta", text: `Built piece gives: ${gave(finding)}` }),
         el("p", { class: "meta", text: `Answer key gives: ${finding.key_gives}` }),
         el("p", { class: "meta", text: `Checking agent expected: ${finding.agent_expected}` }),
       ]),
@@ -414,10 +451,14 @@ function flaggedItem(task, message) {
 
 function checkingPanels(checking, message) {
   if (checking.waiting.length === 0 && checking.flagged.length === 0 && checking.totals.tasks === 0) return [];
+  // The page refreshes by itself once every waiting task has been dealt with, and only if all of them were.
+  // One that could not be recorded stays on screen with its reason, and nothing is retried without a person asking.
   let left = checking.waiting.length;
-  const done = () => {
+  let failed = 0;
+  const done = (ok) => {
     left -= 1;
-    if (left === 0) load();
+    if (!ok) failed += 1;
+    if (left === 0 && failed === 0) load();
   };
   const { totals } = checking;
   return [

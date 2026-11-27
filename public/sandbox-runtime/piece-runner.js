@@ -16,16 +16,16 @@
   const list = document.getElementById("results");
   const CALL_LIMIT_MS = 2000;
 
+  // Runs inside the worker. The piece is loaded exactly as it will be when the
+  // finished project runs on it (see piece-scope.js), so a piece cannot behave
+  // one way while it is judged and another way later.
   function workerSide() {
+    const loadPiece = pieceWorkerSetup();
     let functions = null;
-    self.define = (value) => {
-      functions = value;
-    };
     self.onmessage = (event) => {
       const message = event.data;
       if (message.type === "load") {
-        const source = ['(function () {\n"use strict";\n', message.code, "\n})();"];
-        importScripts(URL.createObjectURL(new Blob(source, { type: "text/javascript" })));
+        functions = loadPiece(message.code);
         postMessage({ type: "loaded" });
       } else if (message.type === "call") {
         try {
@@ -40,17 +40,30 @@
   }
 
   // Deep comparison. Numbers may differ by a hair; shapes must match exactly.
-  function same(actual, expected, tol) {
+  // A value that refers to itself, or is nested absurdly deep, matches nothing:
+  // code written by an agent can return such a thing, and must not be able to
+  // make this loop for ever.
+  function same(actual, expected, tol, depth = 0) {
+    if (depth > 40) return false;
     if (typeof expected === "number") {
       return typeof actual === "number" && Math.abs(actual - expected) <= tol * Math.max(1, Math.abs(expected));
     }
     if (expected === null || typeof expected !== "object") return actual === expected;
     if (Array.isArray(expected)) {
-      return Array.isArray(actual) && actual.length === expected.length && expected.every((item, i) => same(actual[i], item, tol));
+      return Array.isArray(actual) && actual.length === expected.length && expected.every((item, i) => same(actual[i], item, tol, depth + 1));
     }
     if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
     const keys = Object.keys(expected);
-    return Object.keys(actual).length === keys.length && keys.every((key) => same(actual[key], expected[key], tol));
+    return Object.keys(actual).length === keys.length && keys.every((key) => same(actual[key], expected[key], tol, depth + 1));
+  }
+
+  /** The same comparison, for use on anything agent-written code returned: whatever goes wrong, the answer is "not the same". */
+  function sameSafely(actual, expected, tol) {
+    try {
+      return same(actual, expected, tol);
+    } catch {
+      return false;
+    }
   }
 
   // A route across a grid has many right answers. This accepts any route that
@@ -73,8 +86,14 @@
   }
 
   function passes(test, value) {
-    if (test.judge && test.judge.type === "gridPath") return validGridPath(test, value);
-    return same(value, test.expect, typeof test.tol === "number" ? test.tol : 1e-9);
+    if (test.judge && test.judge.type === "gridPath") {
+      try {
+        return validGridPath(test, value);
+      } catch {
+        return false;
+      }
+    }
+    return sameSafely(value, test.expect, typeof test.tol === "number" ? test.tol : 1e-9);
   }
 
   /**
@@ -111,7 +130,7 @@
 
     function start() {
       dead = null;
-      worker = new Worker(URL.createObjectURL(new Blob([`(${workerSide})();`], { type: "text/javascript" })));
+      worker = new Worker(URL.createObjectURL(new Blob([`${pieceWorkerSetup}\n(${workerSide})();`], { type: "text/javascript" })));
       worker.onmessage = (event) => {
         const message = event.data;
         if (!waiting || !message) return;
@@ -186,6 +205,33 @@
     parent.postMessage({ type: "piece-checks", id: data.id, passed, total }, data.reportTo);
   }
 
+  // What a piece returned, cut down to something small that can always be
+  // sent on: plain values only, a limited depth and size, long text shortened.
+  // Code written by an agent can return anything at all, including values that
+  // cannot be written out, or megabytes of them. This is only ever used to
+  // show a person what went wrong; the admin page's server cuts it down again.
+  function reduced(value) {
+    let left = 200;
+    const walk = (item, depth) => {
+      if (--left < 0 || depth > 6) return "(more)";
+      if (item === null || typeof item === "boolean") return item;
+      if (typeof item === "number") return Number.isFinite(item) ? item : "(not-a-finite-number)";
+      if (typeof item === "string") return item.length > 40 ? item.slice(0, 40) : item;
+      if (Array.isArray(item)) return item.slice(0, 50).map((entry) => walk(entry, depth + 1));
+      if (typeof item === "object") {
+        const out = {};
+        for (const key of Object.keys(item).slice(0, 50)) out[key.slice(0, 40)] = walk(item[key], depth + 1);
+        return out;
+      }
+      return "(something-else)";
+    };
+    try {
+      return walk(value, 0);
+    } catch {
+      return "(something-else)";
+    }
+  }
+
   const VERDICT_WORDS = {
     agreed: "Held: the built piece, the answer key and the checking agent all agree",
     not_expected: "Not counted: the checking agent expected something the answer key does not give",
@@ -208,21 +254,27 @@
       // The piece answers twice: one that remembers between calls counts as having no answer.
       const first = await piece.call(nextId++, check.call, check.args);
       const second = first.error ? first : await piece.call(nextId++, check.call, check.args);
-      const built = first.error || second.error ? { error: first.error || second.error } : same(second.value, first.value, tol) ? first : { error: "gave a different answer the second time" };
+      const built =
+        first.error || second.error
+          ? { error: first.error || second.error }
+          : sameSafely(second.value, first.value, tol)
+            ? first
+            : { error: "gave a different answer the second time, or one that cannot be compared" };
 
       let verdict = "unclear";
       if (!keyed.error) {
-        const pieceRight = !built.error && same(built.value, keyed.value, tol);
-        const agentRight = same(check.expect, keyed.value, tol);
+        const pieceRight = !built.error && sameSafely(built.value, keyed.value, tol);
+        const agentRight = sameSafely(check.expect, keyed.value, tol);
         if (pieceRight) verdict = agentRight ? "agreed" : "not_expected";
         else if (agentRight) verdict = "fault";
-        else if (!built.error && same(built.value, check.expect, tol)) verdict = "key_question";
+        else if (!built.error && sameSafely(built.value, check.expect, tol)) verdict = "key_question";
       }
       const finding = verdict === "fault" || verdict === "key_question";
       results.push({
         verdict,
-        // Sent only for findings, for a person to look at. The admin page's server cuts them down before keeping them.
-        ...(finding ? { piece: built.error ? { stopped: true } : built.value, key: keyed.value } : {}),
+        // Sent only for findings, for a person to look at. Whether the piece stopped is said
+        // apart from its answer, so a piece cannot pass off an answer as having stopped.
+        ...(finding ? { piece_stopped: Boolean(built.error), piece: built.error ? null : reduced(built.value), key: reduced(keyed.value) } : {}),
       });
       line(finding ? "fail" : "pass", `${check.call}: ${VERDICT_WORDS[verdict]}`, built.error && finding ? String(built.error).slice(0, 200) : "");
     }

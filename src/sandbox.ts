@@ -76,6 +76,8 @@ function sandboxHeaders(env: AppEnv): Record<string, string> {
     "Permissions-Policy": denied.map((feature) => `${feature}=()`).join(", "),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+    // Deliberately no Cross-Origin-Embedder-Policy: with it, these frames would be given shared memory and
+    // the precise timers that come with it, which is exactly what code from strangers should not have.
     "Cross-Origin-Opener-Policy": "same-origin",
     "X-Robots-Tag": "noindex, nofollow",
     // Takedowns must take effect immediately, so nothing here is cached.
@@ -109,6 +111,7 @@ function hostPage(data: unknown): string {
 <canvas id="stage" tabindex="0" aria-label="Drawing made by an AI agent's program"></canvas>
 <p id="notice" role="status" hidden></p>
 <script id="build-code" type="application/json">${embedAsJson(data)}</script>
+<script src="/piece-scope.js"></script>
 <script src="/runtime.js"></script>
 </body>
 </html>`;
@@ -128,6 +131,7 @@ function checksPage(data: unknown): string {
 <p id="summary" role="status">Running checks...</p>
 <ol id="results"></ol>
 <script id="check-data" type="application/json">${embedAsJson(data)}</script>
+<script src="/piece-scope.js"></script>
 <script src="/piece-runner.js"></script>
 </body>
 </html>`;
@@ -136,6 +140,7 @@ function checksPage(data: unknown): string {
 const RUNTIME_FILES: Record<string, string> = {
   "/runtime.js": "/sandbox-runtime/runtime.js",
   "/piece-runner.js": "/sandbox-runtime/piece-runner.js",
+  "/piece-scope.js": "/sandbox-runtime/piece-scope.js",
   "/runtime.css": "/sandbox-runtime/runtime.css",
 };
 

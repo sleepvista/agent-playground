@@ -11,50 +11,70 @@
   const code = typeof data === "string" ? data : data.code;
   const pieces = typeof data === "string" ? [] : data.pieces;
   const HANG_LIMIT_MS = 4000;
+  // A build answers each frame with one message. Far more than that is a flood, which can use up the tab's memory.
+  const MESSAGES_PER_FRAME_LIMIT = 200;
 
-  // Runs inside the worker, in the same scope as the build. It only sets up
-  // the small drawing interface. Nothing the worker sends back is trusted.
+  // Runs inside the worker. It sets up the small drawing interface. Nothing the worker sends back is trusted.
+  //
+  // A build has the worker to itself, and finds the canvas and the rest as
+  // globals. A finished project is different: its pieces were written by other
+  // agents and judged only on the answers they give. They are loaded first, in
+  // a scope where they can name nothing but the language's building blocks
+  // (see piece-scope.js), and the canvas is never made a global at all: the
+  // project's own program receives it, and everything else, as arguments.
   function workerSide() {
     const listeners = new Map();
     const emit = (type, value) => {
       for (const listener of listeners.get(type) || []) listener(value);
     };
-    const applySize = (size) => {
-      self.view.width = size.width;
-      self.view.height = size.height;
-      self.view.pixelRatio = size.pixelRatio;
-      self.canvas.width = Math.max(1, Math.round(size.width * size.pixelRatio));
-      self.canvas.height = Math.max(1, Math.round(size.height * size.pixelRatio));
-    };
-
-    self.view = { width: 0, height: 0, pixelRatio: 1 };
-    self.pointer = { x: 0, y: 0, down: false, inside: false };
-    self.keys = new Set();
-    self.on = (type, listener) => {
+    let canvas = null;
+    const view = { width: 0, height: 0, pixelRatio: 1 };
+    const pointer = { x: 0, y: 0, down: false, inside: false };
+    const keys = new Set();
+    const on = (type, listener) => {
       if (typeof listener !== "function") throw new TypeError("on(type, listener) needs a function");
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(listener);
+    };
+    const applySize = (size) => {
+      view.width = size.width;
+      view.height = size.height;
+      view.pixelRatio = size.pixelRatio;
+      canvas.width = Math.max(1, Math.round(size.width * size.pixelRatio));
+      canvas.height = Math.max(1, Math.round(size.height * size.pixelRatio));
+    };
+    const run = (parts) => {
+      const address = URL.createObjectURL(new Blob(parts, { type: "text/javascript" }));
+      try {
+        importScripts(address);
+      } finally {
+        URL.revokeObjectURL(address);
+      }
     };
 
     self.onmessage = (event) => {
       const message = event.data;
       if (message.type === "init") {
-        self.canvas = message.canvas;
+        canvas = message.canvas;
         applySize(message.size);
         if (message.pieces.length > 0) {
-          // Each engine piece runs once and hands over its functions through define().
+          const loadPiece = pieceWorkerSetup();
           const engine = {};
           for (const piece of message.pieces) {
-            self.define = (functions) => {
-              engine[piece.id] = Object.freeze(functions);
-            };
-            const source = ['(function () {\n"use strict";\n', piece.code, "\n})();"];
-            importScripts(URL.createObjectURL(new Blob(source, { type: "text/javascript" })));
+            const functions = loadPiece(piece.code);
+            if (!functions) throw new Error("A piece handed over no functions.");
+            engine[piece.id] = functions;
           }
-          delete self.define;
-          self.engine = Object.freeze(engine);
+          Object.freeze(engine);
+          self.__start = (main) => {
+            delete self.__start;
+            main(canvas, view, pointer, keys, on, engine);
+          };
+          run(["__start(function (canvas, view, pointer, keys, on, engine) {\n", message.code, "\n});"]);
+        } else {
+          Object.assign(self, { canvas, view, pointer, keys, on });
+          run([message.code]);
         }
-        importScripts(URL.createObjectURL(new Blob([message.code], { type: "text/javascript" })));
         postMessage({ type: "ready" });
       } else if (message.type === "frame") {
         try {
@@ -64,13 +84,13 @@
         }
       } else if (message.type === "resize") {
         applySize(message.size);
-        emit("resize", self.view);
+        emit("resize", view);
       } else if (message.type === "pointer") {
-        Object.assign(self.pointer, message.state);
-        emit(message.event, self.pointer);
+        Object.assign(pointer, message.state);
+        emit(message.event, pointer);
       } else if (message.type === "key") {
-        if (message.event === "keydown") self.keys.add(message.key);
-        else self.keys.delete(message.key);
+        if (message.event === "keydown") keys.add(message.key);
+        else keys.delete(message.key);
         emit(message.event, message.key);
       }
     };
@@ -82,7 +102,7 @@
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
   });
 
-  const worker = new Worker(URL.createObjectURL(new Blob([`(${workerSide})();`], { type: "text/javascript" })));
+  const worker = new Worker(URL.createObjectURL(new Blob([`${pieceWorkerSetup}\n(${workerSide})();`], { type: "text/javascript" })));
   let stopped = false;
   let ready = false;
   let waitingSince = performance.now(); // waiting for "ready", then for each frame's "ack"
@@ -96,7 +116,13 @@
     notice.hidden = false;
   }
 
+  let messagesSinceFrame = 0;
   worker.onmessage = (event) => {
+    // The hang check below catches a build that goes silent. This catches one that never stops talking.
+    if (++messagesSinceFrame > MESSAGES_PER_FRAME_LIMIT) {
+      stop("This build sent far more messages than it should, so it was shut down.");
+      return;
+    }
     const type = event.data && event.data.type;
     if (type === "ready") ready = true;
     if (type === "ready" || type === "ack") waiting = false;
@@ -115,6 +141,7 @@
     if (ready && !waiting) {
       waiting = true;
       waitingSince = performance.now();
+      messagesSinceFrame = 0;
       worker.postMessage({ type: "frame", time });
     }
     requestAnimationFrame(tick);

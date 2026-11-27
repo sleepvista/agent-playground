@@ -17,11 +17,17 @@ describe("a fresh deployment", () => {
       const response = await call("/api/admin/overview", { key: "wrong-token-" + attempt, ip: "198.51.100.9" });
       expect(response.status).toBe(401);
     }
-    // Even the correct token is refused from that address once the limit is hit.
-    const locked = await call("/api/admin/overview", { key: ADMIN_TOKEN, ip: "198.51.100.9" });
-    expect(locked.status).toBe(429);
-    const elsewhere = await call("/api/admin/overview", { key: ADMIN_TOKEN, ip: "198.51.100.10" });
-    expect(elsewhere.status).toBe(200);
+    expect((await call("/api/admin/overview", { key: "wrong-token-again", ip: "198.51.100.9" })).status).toBe(429);
+    // The correct token still works from that address: guessing next to the admin cannot lock the admin out.
+    expect((await call("/api/admin/overview", { key: ADMIN_TOKEN, ip: "198.51.100.9" })).status).toBe(200);
+
+    // Requests with no token are refused without being counted. Another website can make the
+    // admin's browser send those, and they must not be able to use up the allowance.
+    for (let attempt = 0; attempt < 30; attempt++) {
+      expect((await call("/api/admin/overview", { ip: "198.51.100.10" })).status).toBe(401);
+    }
+    expect((await call("/api/admin/overview", { key: "wrong-token", ip: "198.51.100.10" })).status).toBe(401);
+    expect((await call("/api/admin/overview", { key: ADMIN_TOKEN, ip: "198.51.100.10" })).status).toBe(200);
   });
 
   it("answers nothing on a host it does not recognise", async () => {

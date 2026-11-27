@@ -74,10 +74,17 @@ describe("build code", () => {
 });
 
 describe("rate-limit address grouping", () => {
-  it("keeps IPv4 addresses separate and groups an IPv6 /64", () => {
+  it("keeps IPv4 addresses separate and groups IPv6 by the /56 one customer is given", () => {
     expect(ipRateKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(ipRateKey("::ffff:203.0.113.7")).toBe("::ffff:203.0.113.7");
     expect(ipRateKey("2001:db8:1:2:aaaa:bbbb:cccc:dddd")).toBe(ipRateKey("2001:0db8:0001:0002::1"));
-    expect(ipRateKey("2001:db8:1:2::1")).not.toBe(ipRateKey("2001:db8:1:3::1"));
-    expect(ipRateKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    // Every /64 inside one /56 is the same customer.
+    expect(ipRateKey("2001:db8:1:200::1")).toBe(ipRateKey("2001:db8:1:2ff:9::1"));
+    expect(ipRateKey("2001:db8:1:200::1")).not.toBe(ipRateKey("2001:db8:1:300::1"));
+    expect(ipRateKey("2001:db8::1")).toBe("20010db8000000/56");
+    // The wider grouping takes in a whole /48.
+    expect(ipRateKey("2001:db8:1:200::1", 48)).toBe(ipRateKey("2001:db8:1:ff00::1", 48));
+    expect(ipRateKey("2001:db8:1::1", 48)).not.toBe(ipRateKey("2001:db8:2::1", 48));
+    expect(ipRateKey("203.0.113.7", 48)).toBe("203.0.113.7");
   });
 });

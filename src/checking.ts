@@ -1,10 +1,12 @@
 import { requireAgent } from "./auth";
+import { CheckRuleError, assertCheckFits, rulesFor, type PieceRules } from "./check-rules";
 import { CHECKING_ID, LIMITS, PROJECT_ID, type AppEnv } from "./config";
 import { randomHex, signPreview } from "./crypto";
 import { HttpError, json, readJson, readOptionalJson } from "./http";
 import { PlainDataError, assertPlainData, describeForDisplay } from "./plain-data";
 import { audit, getSettings, iso, nextDayStart, utcDay } from "./store";
 import { checkModelName } from "./text-safety";
+import type { TestCase } from "./work";
 import { reopenPiece } from "./work-admin";
 
 /**
@@ -41,6 +43,8 @@ interface StoredResult {
   /** What the built piece and the answer key returned, cut down for display. Kept only for findings. */
   piece?: string;
   key?: string;
+  /** The piece gave no answer: it hung, crashed, or answered differently the second time. */
+  piece_stopped?: boolean;
 }
 
 type CheckingStatus = "claimed" | "submitted" | "clear" | "flagged" | "closed";
@@ -77,7 +81,8 @@ const takenToday = (agent: string, project: string, day: string) =>
 const checkable = (agent: string) =>
   `(p.accepted_work_id IS NOT NULL AND p.check_calls <> '{}' AND p.reference_code <> ''
     AND (SELECT w.agent_id FROM work w WHERE w.id = p.accepted_work_id) <> ${agent}
-    AND NOT EXISTS (SELECT 1 FROM checking mine WHERE mine.work_id = p.accepted_work_id AND mine.agent_id = ${agent}))`;
+    AND NOT EXISTS (SELECT 1 FROM checking mine WHERE mine.work_id = p.accepted_work_id AND mine.agent_id = ${agent})
+    AND (SELECT COUNT(*) FROM checking every WHERE every.work_id = p.accepted_work_id) < ${LIMITS.checkersPerWork})`;
 
 /** A checking task the agent holds and can still hand in. An agent holds one at a time. */
 const inHand = (agent: string, ts: string) =>
@@ -145,7 +150,9 @@ function describe(row: CheckingRow, ts: number) {
           ? "waiting to be run"
           : ran
             ? "run"
-            : "closed before it was run: the piece changed",
+            : row.resolution === "not_run"
+              ? "closed without being run"
+              : "closed before it was run: the piece changed",
     hand_in_by: row.status === "claimed" ? iso(row.expires_at) : null,
     // One line per check, in the order sent. Never what the piece or the answer key returned.
     results: ran ? results.map((result, index) => ({ check: index, outcome: WORDS[result.verdict] })) : null,
@@ -169,9 +176,9 @@ async function taskReply(env: AppEnv, row: CheckingRow) {
       "For each, work out from the task what the right answer is.",
     how_to_hand_in:
       `POST ${env.GALLERY_ORIGIN}/api/v1/checking/submit with {"checks": [{"call": "name", "args": [...], "expect": ...}], "model": "..."} ("model" is optional). ` +
-      `1 to ${LIMITS.checksPerTask} checks. "call" is one of functions_you_may_check, "args" is the list of arguments, "expect" is the answer the task says is right. ` +
-      'Checks are plain data only: numbers, true, false, null, short names (at most 24 letters, digits, "_", "-" or ".", no spaces), and lists and objects of those. ' +
-      "Stay inside what the task allows as input. You get one hand-in per task.",
+      `1 to ${LIMITS.checksPerTask} different checks. "call" is one of functions_you_may_check, "args" is the list of arguments, "expect" is the answer the task says is right. ` +
+      "A check must look like the task's own examples: the same number and kinds of arguments, the same field names, numbers of a similar size, " +
+      "and no text other than names the task itself uses. Do not repeat an example. Stay inside what the task allows as input. You get one hand-in per task.",
     about_this_task:
       "The task text was written by the site's operator. Your checks are run later against the built piece and the answer key. " +
       "You are never shown the built code, the answer key, or what either returns.",
@@ -196,6 +203,7 @@ async function claimChecking(db: D1Database, agentId: string, projectId: string 
          AND (?6 IS NULL OR p.project_id = ?6)
          AND ${takenToday("?2", "p.project_id", "?3")} < ?7
          AND NOT ${inHand("?2", "?4")}
+         AND (SELECT status FROM agents WHERE id = ?2) = 'active'
        ORDER BY (SELECT COUNT(*) FROM checking x WHERE x.work_id = p.accepted_work_id) ASC, RANDOM()
        LIMIT 1
        ON CONFLICT DO NOTHING`,
@@ -268,21 +276,23 @@ async function status(request: Request, env: AppEnv, ts: number): Promise<Respon
 }
 
 /** Checks one proposed check and returns it in the exact form it is stored and run in. */
-function parseCheck(raw: unknown, index: number, allowed: Set<string>): ProposedCheck {
+function parseCheck(raw: unknown, index: number, rules: PieceRules): ProposedCheck {
   const invalid = (message: string) => new HttpError(400, "invalid_checks", `Check ${index}: ${message} Nothing was handed in; fix it and send again.`, { field: "checks" });
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw invalid('must be an object with "call", "args" and "expect".');
   const { call, args, expect } = raw as Record<string, unknown>;
-  if (typeof call !== "string" || !allowed.has(call)) throw invalid(`"call" must be one of: ${[...allowed].sort().join(", ")}.`);
-  if (!Array.isArray(args) || args.length > 8) throw invalid('"args" must be a list of at most 8 arguments.');
+  if (typeof call !== "string" || !rules.calls.has(call)) throw invalid(`"call" must be one of: ${[...rules.calls.keys()].sort().join(", ")}.`);
+  if (!Array.isArray(args)) throw invalid('"args" must be the list of arguments.');
   if (expect === undefined) throw invalid('"expect" is missing. Give the answer the task says is right; use null if that is the answer.');
+  const check = { call, args, expect };
   try {
     assertPlainData(args);
     assertPlainData(expect);
+    assertCheckFits(check, rules);
   } catch (err) {
-    if (!(err instanceof PlainDataError)) throw err;
-    throw invalid(`it ${err.message}.`);
+    if (err instanceof PlainDataError) throw invalid(`it ${err.message}.`);
+    if (err instanceof CheckRuleError) throw invalid(`${err.message}.`);
+    throw err;
   }
-  const check = { call, args, expect };
   if (new TextEncoder().encode(JSON.stringify(check)).byteLength > LIMITS.checkMaxBytes) {
     throw invalid(`is larger than ${LIMITS.checkMaxBytes} bytes when written out.`);
   }
@@ -299,16 +309,26 @@ async function submit(request: Request, env: AppEnv, ts: number): Promise<Respon
   if (!Array.isArray(body.checks) || body.checks.length < 1 || body.checks.length > LIMITS.checksPerTask) {
     throw new HttpError(400, "invalid_checks", `"checks" must be a list of 1 to ${LIMITS.checksPerTask} checks. Nothing was handed in.`, { field: "checks" });
   }
-  const piece = await env.DB.prepare("SELECT check_calls FROM pieces WHERE id = ?").bind(row.piece_id).first<{ check_calls: string }>();
-  const allowed = new Set(Object.keys(JSON.parse(piece?.check_calls ?? "{}") as Record<string, number>));
-  const checks = body.checks.map((raw, index) => parseCheck(raw, index, allowed));
+  const piece = await env.DB
+    .prepare("SELECT public_tests, hidden_tests FROM pieces WHERE id = ?")
+    .bind(row.piece_id)
+    .first<{ public_tests: string; hidden_tests: string }>();
+  if (!piece) throw new HttpError(404, "not_found", "No such piece.");
+  const rules = rulesFor(JSON.parse(piece.public_tests) as TestCase[], JSON.parse(piece.hidden_tests) as TestCase[]);
+  const checks = body.checks.map((raw, index) => parseCheck(raw, index, rules));
+  const written = checks.map((check) => JSON.stringify([check.call, check.args]));
+  const repeat = written.findIndex((entry, index) => written.indexOf(entry) !== index);
+  if (repeat !== -1) {
+    throw new HttpError(400, "invalid_checks", `Check ${repeat} repeats an earlier check. Send each input once. Nothing was handed in.`, { field: "checks" });
+  }
 
   const updated = await env.DB
     .prepare(
       `UPDATE checking SET status = 'submitted', model = ?, checks = ?, submitted_at = ?
-       WHERE id = ? AND agent_id = ? AND status = 'claimed' AND expires_at > ?`,
+       WHERE id = ? AND agent_id = ? AND status = 'claimed' AND expires_at > ?
+         AND (SELECT status FROM agents WHERE id = ?) = 'active'`,
     )
-    .bind(model, JSON.stringify(checks), ts, row.id, agent.id, ts)
+    .bind(model, JSON.stringify(checks), ts, row.id, agent.id, ts, agent.id)
     .run();
   if (updated.meta.changes !== 1) throw new HttpError(409, "nothing_to_hand_in", "This checking task was already handed in, or the piece changed.");
   const after = await byId(env.DB, row.id);
@@ -374,12 +394,17 @@ interface AdminRow {
   results: string;
   submitted_at: number;
   current: number;
+  check_count?: number;
 }
 
 /** The checking part of the admin overview. */
 export async function checkingOverview(env: AppEnv, ts: number) {
   const [waiting, flagged, totals] = await env.DB.batch([
-    env.DB.prepare(`SELECT ${ADMIN_COLUMNS} ${ADMIN_FROM} WHERE k.status = 'submitted' AND p.accepted_work_id = k.work_id ORDER BY k.submitted_at LIMIT 20`),
+    // The waiting list needs only how many checks each task holds, not the checks themselves.
+    env.DB.prepare(
+      `SELECT ${ADMIN_COLUMNS.replace("k.checks, k.results", "json_array_length(k.checks) AS check_count, '' AS checks, '' AS results")} ${ADMIN_FROM}
+       WHERE k.status = 'submitted' AND p.accepted_work_id = k.work_id ORDER BY k.submitted_at LIMIT 20`,
+    ),
     env.DB.prepare(`SELECT ${ADMIN_COLUMNS} ${ADMIN_FROM} WHERE k.status = 'flagged' ORDER BY k.submitted_at LIMIT 20`),
     env.DB.prepare(
       `SELECT COUNT(*) AS tasks, COALESCE(SUM(agreed), 0) AS held, COALESCE(SUM(faults), 0) AS faults
@@ -401,7 +426,7 @@ export async function checkingOverview(env: AppEnv, ts: number) {
     waiting: await Promise.all(
       ((waiting?.results ?? []) as AdminRow[]).map(async (row) => ({
         ...base(row),
-        checks: (JSON.parse(row.checks) as unknown[]).length,
+        checks: row.check_count ?? 0,
         // Opens the task in the sandbox, where the checks run.
         frame_url: `${env.SANDBOX_ORIGIN}/c/${row.id}?p=${await signPreview(env, row.id, ts + LIMITS.previewSeconds)}`,
       })),
@@ -418,9 +443,11 @@ export async function checkingOverview(env: AppEnv, ts: number) {
           .map(({ result, check }) => ({
             kind: result.verdict,
             call: check.call,
-            args: JSON.stringify(check.args).slice(0, LIMITS.findingMaxChars),
+            // Shown whole: a check is small, and a person deciding on it must see all of the input.
+            args: JSON.stringify(check.args),
             agent_expected: describeForDisplay(check.expect),
-            piece_gave: result.piece ?? "",
+            piece_stopped: result.piece_stopped === true,
+            piece_gave: result.piece_stopped ? "" : (result.piece ?? ""),
             key_gives: result.key ?? "",
           })),
       };
@@ -441,7 +468,9 @@ async function record(env: AppEnv, id: string, body: Record<string, unknown>, ts
     if (!VERDICTS.includes(verdict)) throw new HttpError(400, "invalid_result", "Unknown verdict.");
     const finding = verdict === "fault" || verdict === "key_question";
     // What agent-written code returned is never stored or shown as it came.
-    return finding ? { verdict, piece: describeForDisplay(raw.piece), key: describeForDisplay(raw.key) } : { verdict };
+    if (!finding) return { verdict };
+    const stopped = raw.piece_stopped === true;
+    return { verdict, piece_stopped: stopped, piece: stopped ? "" : describeForDisplay(raw.piece), key: describeForDisplay(raw.key) };
   });
   const count = (verdict: Verdict) => results.filter((result) => result.verdict === verdict).length;
   const flagged = count("fault") + count("key_question") > 0;
@@ -455,6 +484,17 @@ async function record(env: AppEnv, id: string, body: Record<string, unknown>, ts
   if (updated.meta.changes !== 1) throw new HttpError(409, "wrong_state", "That checking task is not waiting to be run.");
   await audit(env.DB, "admin", "checking_run", id, `${count("agreed")} held, ${count("fault")} faults, ${count("key_question")} questions`, ts);
   return json({ ok: true, status: flagged ? "flagged" : "clear" });
+}
+
+/** Closes a task that is waiting to be run, without running it. For one that cannot be run or should not be. */
+async function closeWaiting(env: AppEnv, id: string, ts: number): Promise<Response> {
+  const closed = await env.DB
+    .prepare("UPDATE checking SET status = 'closed', resolution = 'not_run', decided_at = ? WHERE id = ? AND status = 'submitted'")
+    .bind(ts, id)
+    .run();
+  if (closed.meta.changes !== 1) throw new HttpError(409, "wrong_state", "That checking task is not waiting to be run.");
+  await audit(env.DB, "admin", "checking_close", id, "", ts);
+  return json({ ok: true });
 }
 
 async function settle(env: AppEnv, id: string, action: string, ts: number): Promise<Response> {
@@ -479,6 +519,7 @@ export async function handleCheckingAdmin(request: Request, env: AppEnv, url: UR
   if (!match) return null;
   const body = await readJson(request, LIMITS.checkingRequestMaxBytes);
   if (body.action === "record") return record(env, match[1]!, body, ts);
+  if (body.action === "close") return closeWaiting(env, match[1]!, ts);
   if (body.action === "dismiss" || body.action === "reopen_piece") return settle(env, match[1]!, body.action, ts);
-  throw new HttpError(400, "invalid_action", '"action" must be record, dismiss or reopen_piece.');
+  throw new HttpError(400, "invalid_action", '"action" must be record, close, dismiss or reopen_piece.');
 }

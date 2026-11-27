@@ -1,5 +1,5 @@
 import { AGENT_ID, BUILD_ID, LIMITS, type AppEnv, type Settings } from "./config";
-import { ipHash, safeEqual, signPreview } from "./crypto";
+import { ipHash, safeEqual, signPreview, usableSecret } from "./crypto";
 import { checkingOverview, handleCheckingAdmin } from "./checking";
 import { handleVoteAdmin, voteOverview } from "./vote";
 import { problemsOverview } from "./problems";
@@ -8,12 +8,11 @@ import { HttpError, clientIp, json, readJson } from "./http";
 import {
   audit,
   getSettings,
-  hit,
   iso,
   listAgents,
   listBuildsByStatus,
   moderateBuild,
-  peek,
+  overLimit,
   saveSettings,
   setAgentBanned,
   siteCounts,
@@ -21,22 +20,26 @@ import {
   type BuildAction,
 } from "./store";
 
+/**
+ * The correct token always gets through. Only wrong tokens are counted and
+ * slowed down, and a request with no token is refused without counting, so
+ * nobody can lock the admin out by sending junk from the same address or by
+ * getting the admin's browser to request this address from another page.
+ */
 async function requireAdmin(request: Request, env: AppEnv, ts: number): Promise<void> {
   const token = env.ADMIN_TOKEN ?? "";
-  if (token.length < 32) {
+  if (!usableSecret(env, token)) {
     // Fail closed: no admin access at all until a proper secret is configured.
     throw new HttpError(503, "not_configured", "Admin access is not configured.");
   }
-  const failBucket = `adminfail:${await ipHash(env, clientIp(request))}`;
-  if ((await peek(env.DB, failBucket, 3600, ts)) >= LIMITS.adminFailuresPerIpPerHour) {
-    throw new HttpError(429, "too_many_failed_logins", "Too many failed attempts. Try again in an hour.");
-  }
   const header = request.headers.get("Authorization") ?? "";
   const supplied = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (supplied === "" || !(await safeEqual(supplied, token))) {
-    await hit(env.DB, failBucket, 3600, ts);
-    throw new HttpError(401, "unauthorized", "Wrong admin token.");
+  if (supplied === "") throw new HttpError(401, "unauthorized", "Admin token missing.");
+  if (await safeEqual(supplied, token)) return;
+  if (await overLimit(env.DB, `adminfail:${await ipHash(env, clientIp(request))}`, 3600, LIMITS.adminFailuresPerIpPerHour, ts)) {
+    throw new HttpError(429, "too_many_failed_logins", "Too many failed attempts. Try again in an hour.");
   }
+  throw new HttpError(401, "unauthorized", "Wrong admin token.");
 }
 
 async function adminBuild(env: AppEnv, build: AdminBuild, ts: number) {
@@ -49,6 +52,8 @@ async function adminBuild(env: AppEnv, build: AdminBuild, ts: number) {
     agent_id: build.agent_id,
     agent_name: build.agent_name,
     status: build.status,
+    // False for a build that went on show before a person read its title and note; they stay hidden until confirmed.
+    words_reviewed: build.reviewed === 1,
     created_at: iso(build.created_at),
     size_bytes: build.code_bytes,
     report_count: build.report_count,
@@ -139,8 +144,8 @@ export async function handleAdminApi(request: Request, env: AppEnv, url: URL, ts
   const build = new RegExp(`^/api/admin/builds/(${BUILD_ID})$`).exec(pathname);
   if (build && method === "POST") {
     const { action } = await readJson(request, LIMITS.smallRequestMaxBytes);
-    if (action !== "approve" && action !== "reject" && action !== "hide") {
-      throw new HttpError(400, "invalid_action", '"action" must be approve, reject or hide.');
+    if (action !== "approve" && action !== "reject" && action !== "hide" && action !== "confirm") {
+      throw new HttpError(400, "invalid_action", '"action" must be approve, reject, hide or confirm.');
     }
     if (!(await moderateBuild(env.DB, build[1]!, action as BuildAction, ts))) {
       throw new HttpError(409, "wrong_state", "That build is not in a state this action applies to.");

@@ -181,7 +181,7 @@ try {
     images: document.images.length,
     notice: document.getElementById("notice").hidden,
   }));
-  check("markup hidden in the code did not become part of the page", hostPage.title === "Build" && hostPage.scripts === 2 && hostPage.images === 0, JSON.stringify(hostPage));
+  check("markup hidden in the code did not become part of the page", hostPage.title === "Build" && hostPage.scripts === 3 && hostPage.images === 0, JSON.stringify(hostPage));
   check("gallery page was not navigated away", page.url() === `${GALLERY}/build/${id}`, page.url());
   check("no popup windows", popups.length === 0, popups.join(", "));
   check("no dialogs", dialogs.length === 0, dialogs.join(", "));
